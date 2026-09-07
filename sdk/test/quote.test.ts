@@ -7,8 +7,11 @@
  * against the thing it reflects with the same numbers.
  */
 import { describe, expect, test } from "bun:test";
-import { ONE_Q64 } from "../src/constants";
-import { swapInBin } from "../src/quote";
+import { PublicKey } from "@solana/web3.js";
+import { ONE_Q64, POOL_ENABLED } from "../src/constants";
+import { buildConfig } from "../src/ladder";
+import { quoteSwap, swapInBin } from "../src/quote";
+import type { BinView, ConfigView, PoolView } from "../src/types";
 
 const NO_FEE = 0n;
 const THIRTY_BPS = 3_000_000n; // 0.3% against FEE_PRECISION
@@ -138,5 +141,134 @@ describe("swapInBin", () => {
         expect(valueIn >= y).toBe(true);
       }
     }
+  });
+});
+
+/**
+ * `swap` and `swap_strict` are the same walk; the only difference is what a
+ * short fill means. So the quote's job is not to compute anything new, it is
+ * to say which of the two a given size would get.
+ */
+describe("quoteSwap, strict", () => {
+  const KEY = new PublicKey("11111111111111111111111111111112");
+
+  /** One bin at price 1.0 holding `amountY`, and nothing on either side. */
+  function oneBinPool(amountY: bigint) {
+    const bins = new Map<number, BinView>([
+      [
+        0,
+        {
+          binId: 0,
+          amountX: 0n,
+          amountY,
+          priceQ64: ONE_Q64,
+          price: 1,
+          liquiditySupply: 0n,
+          feeXPerShare: 0n,
+          feeYPerShare: 0n,
+          stepBpX100: 1_000, // a 10 bps bin
+          derived: true
+        }
+      ]
+    ]);
+    const pool = {
+      config: KEY,
+      tokenXMint: KEY,
+      tokenYMint: KEY,
+      reserveX: KEY,
+      reserveY: KEY,
+      creator: KEY,
+      occupiedArrays: new Set([0]),
+      protocolFeeX: 0n,
+      protocolFeeY: 0n,
+      lastUpdateTimestamp: 0n,
+      activeId: 0,
+      indexReference: 0,
+      volatilityAccumulator: 0,
+      volatilityReference: 0,
+      status: POOL_ENABLED,
+      tokenXFlag: 0,
+      tokenYFlag: 0,
+      tokenXDecimals: 6,
+      tokenYDecimals: 6
+    } satisfies PoolView;
+    // Fees off, so the numbers below are the bin price and nothing else.
+    const config = {
+      ...buildConfig(0, 10, Infinity, { baseFactor: 0, variableFeeControl: 0 }),
+      authority: KEY
+    } satisfies ConfigView;
+    return { pool, config, bins };
+  }
+
+  const quote = (amountIn: bigint, strict: boolean, amountY = 1_000n) => {
+    const { pool, config, bins } = oneBinPool(amountY);
+    return quoteSwap({
+      pool,
+      config,
+      bins,
+      // Only the home array exists, so the walk cannot leave it.
+      hasArray: (index) => index === 0,
+      amountIn,
+      swapForY: true,
+      now: 0,
+      strict
+    });
+  };
+
+  test("a fill the pool can absorb is not a revert either way", () => {
+    for (const strict of [false, true]) {
+      const q = quote(500n, strict);
+      expect(q.partial).toBe(false);
+      expect(q.wouldRevert).toBe(false);
+      expect(q.amountIn).toBe(500n);
+      expect(q.amountOut).toBe(500n);
+    }
+  });
+
+  test("a short fill is a partial swap but a reverting strict one", () => {
+    const loose = quote(5_000n, false);
+    expect(loose.partial).toBe(true);
+    expect(loose.wouldRevert).toBe(false);
+
+    const strict = quote(5_000n, true);
+    expect(strict.partial).toBe(true);
+    expect(strict.wouldRevert).toBe(true);
+  });
+
+  test("strict changes nothing about the walk itself", () => {
+    const { fills: looseFills, ...loose } = quote(5_000n, false);
+    const { fills: strictFills, ...strict } = quote(5_000n, true);
+    expect({ ...strict, wouldRevert: false }).toEqual(loose);
+    expect(strictFills).toEqual(looseFills);
+  });
+
+  test("amountIn on a reverting quote is the largest input that would fill", () => {
+    // The documented way out of a revert: re-quote at what the walk reached,
+    // rather than bisecting for it.
+    const reverting = quote(5_000n, true);
+    expect(reverting.wouldRevert).toBe(true);
+
+    const retry = quote(reverting.amountIn, true);
+    expect(retry.wouldRevert).toBe(false);
+    expect(retry.partial).toBe(false);
+    expect(retry.amountOut).toBe(reverting.amountOut);
+  });
+
+  test("a walk stopped by a missing bin array reverts strictly too", () => {
+    // Not a thin pool this time: the input is affordable, but the array the
+    // walk needs next was never handed to the instruction.
+    const { pool, config, bins } = oneBinPool(1_000n);
+    const q = quoteSwap({
+      pool,
+      config,
+      bins,
+      hasArray: () => false,
+      amountIn: 100n,
+      swapForY: true,
+      now: 0,
+      strict: true
+    });
+    expect(q.binsCrossed).toBe(0);
+    expect(q.wouldRevert).toBe(true);
   });
 });

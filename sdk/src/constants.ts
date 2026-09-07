@@ -35,6 +35,7 @@ export const DISCRIMINATORS = {
   claimFee: [169, 32, 79, 137, 136, 232, 70, 137],
   closePosition: [123, 134, 81, 0, 49, 68, 98, 98],
   swap: [248, 198, 158, 145, 225, 117, 135, 200],
+  swapStrict: [15, 167, 210, 168, 62, 143, 10, 227],
   withdrawProtocolFee: [158, 201, 158, 189, 33, 93, 162, 103],
   setPoolStatus: [112, 87, 135, 223, 83, 204, 132, 53],
   updateConfig: [29, 158, 252, 191, 10, 83, 219, 99]

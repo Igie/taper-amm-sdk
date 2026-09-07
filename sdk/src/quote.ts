@@ -123,6 +123,13 @@ export type QuoteInput = {
   swapForY: boolean;
   /** Unix seconds the transaction will land at. Drives the volatility decay. */
   now: number;
+  /**
+   * Quote for `swap_strict` rather than `swap`.
+   *
+   * Changes nothing about the walk — the two instructions are the same walk —
+   * only how a short fill is reported. See `Quote.wouldRevert`.
+   */
+  strict?: boolean;
 };
 
 /** One bin's contribution to a walk, in the order the walk visited them. */
@@ -161,6 +168,17 @@ export type Quote = {
   endId: number;
   /** True when the pool could not absorb the whole input. */
   partial: boolean;
+  /**
+   * True when this quote was asked for `swap_strict` and the walk fell short,
+   * so the instruction would revert with `IncompleteFill` and move nothing.
+   *
+   * The numbers beside it still describe what the walk *did* reach, which is
+   * what makes them useful: `amountIn` is the largest input this pool would
+   * fill completely, so a caller handed a reverting quote can re-quote at that
+   * size rather than bisecting for it. (On a transfer-fee input mint it is in
+   * arrival units, so gross it back up before handing it to the instruction.)
+   */
+  wouldRevert: boolean;
   /** Average execution price, Y-lamports per X-lamport. */
   executionPrice: number;
   /** Fee as a fraction of the input actually consumed. */
@@ -186,7 +204,8 @@ export function quoteSwap({
   hasArray,
   amountIn,
   swapForY,
-  now
+  now,
+  strict = false
 }: QuoteInput): Quote {
   const startId = pool.activeId;
   let activeId = startId;
@@ -277,6 +296,8 @@ export function quoteSwap({
         : Number(totalIn) / Number(totalOut)
       : 0;
 
+  const partial = totalIn < amountIn;
+
   return {
     amountIn: totalIn,
     amountOut: totalOut,
@@ -284,7 +305,8 @@ export function quoteSwap({
     binsCrossed: crossed,
     startId,
     endId: activeId,
-    partial: totalIn < amountIn,
+    partial,
+    wouldRevert: strict && partial,
     executionPrice,
     effectiveFeeRate: totalIn > 0n ? Number(totalFee) / Number(totalIn) : 0,
     fills,

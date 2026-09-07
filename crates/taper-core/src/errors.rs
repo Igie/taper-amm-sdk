@@ -61,6 +61,7 @@ macro_rules! taper_error_table {
             TokenProgramMismatch, "Token program does not own the mint it was passed for";
             BinRangeExceedsBitmap, "Config bin range reaches past the bin ids the pool bitmap can cover";
             BandMayOnlyWiden, "A config's bin range may only be widened, never narrowed";
+            IncompleteFill, "Swap could not consume the whole input and strict fill was required";
         }
     };
 }
@@ -166,7 +167,7 @@ mod tests {
             assert_eq!(*error as u32, index as u32, "{}", error.name());
         }
         assert_eq!(CoreError::MathOverflow as u32, 0);
-        assert_eq!(CoreError::ALL.len(), 32);
+        assert_eq!(CoreError::ALL.len(), 33);
     }
 
     #[test]

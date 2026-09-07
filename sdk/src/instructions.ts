@@ -194,7 +194,7 @@ export function closePositionIx(owner: PublicKey, position: PublicKey) {
   );
 }
 
-export function swapIx(
+type SwapArgs = [
   user: PublicKey,
   pool: PublicKey,
   config: PublicKey,
@@ -207,9 +207,51 @@ export function swapIx(
   amountIn: bigint,
   minAmountOut: bigint,
   swapForY: boolean
+];
+
+/**
+ * Swaps along the ladder, filling as far as the liquidity and the supplied bin
+ * arrays allow and taking only the input it used.
+ */
+export const swapIx = (...args: SwapArgs) => buildSwap(DISC.swap, args);
+
+/**
+ * The same swap, all or nothing: a walk that cannot consume the whole input
+ * reverts with `IncompleteFill` rather than filling what it can.
+ *
+ * For a trader with their own wallet a partial fill is strictly better, which
+ * is why this is the exception. It is for callers that have nowhere to put the
+ * remainder — a router executing through a shared program account would leave
+ * it stranded in an ATA it does not own.
+ *
+ * `quoteSwap` with `strict` set reports whether this would revert, and its
+ * `amountIn` is the largest input that would not.
+ */
+export const swapStrictIx = (...args: SwapArgs) => buildSwap(DISC.swapStrict, args);
+
+/**
+ * Byte for byte identical but for the discriminator — which is exactly what
+ * the two instructions are on chain.
+ */
+function buildSwap(
+  disc: readonly number[],
+  [
+    user,
+    pool,
+    config,
+    tokens,
+    userTokenIn,
+    userTokenOut,
+    reserveX,
+    reserveY,
+    binArrays,
+    amountIn,
+    minAmountOut,
+    swapForY
+  ]: SwapArgs
 ) {
   return ix(
-    DISC.swap,
+    disc,
     [
       { pubkey: user, isSigner: true, isWritable: false },
       { pubkey: pool, isSigner: false, isWritable: true },
