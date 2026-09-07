@@ -21,9 +21,10 @@ taper-core = { path = "../crates/taper-core" }
 # `taper-core`, which depends on `bytemuck` and nothing else either way.
 jupiter-amm-interface = "0.6.1"
 
-# Not used by any of our code. `jupiter-amm-interface` 0.6.1 imports
-# `UiAccount::decode` from it, and `solana-account-decoder` 4.x removed that
-# method - so with the interface's own `>=2` requirement resolving to the
-# newest, the interface itself fails to compile. Pinning the major it was
-# written against is what fixes it. `1.0.0-beta.0` does not need this line.
+# Not used by any of our code, and here only to steer resolution.
+# `jupiter-amm-interface` 0.6.1 calls `UiAccount::decode`, which
+# `solana-account-decoder` 4.x removed; the interface asks for `>= 2`, so a
+# fresh resolve hands it 4.x and the interface itself fails to compile. Naming
+# an older major here keeps the graph off 4.x - the interface then links
+# 3.1.14, which still has the method. `1.0.0-beta.0` needs none of this.
 solana-account-decoder = "~2"

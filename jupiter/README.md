@@ -69,8 +69,11 @@ real variant; everything either side of it is done and tested.
 `jupiter-amm-interface = "0.6.1"`, in `[workspace.dependencies]` so there is one
 line to change.
 
-It does not build on its own. The interface requires `solana-account-decoder
->= 2` and calls `UiAccount::decode`, which 4.x removed, so a fresh resolve picks
-a version the interface cannot compile against. The workspace pins `~2` to fix
-it. `1.0.0-beta.0` builds with no pin and no other change to our code; both were
-tried before this was chosen.
+Chosen because it is what `jup-ag/jupiter-amm-implementation` itself pins:
+`0.6.0`, with `solana-account-decoder` locked at `2.2.19`.
+
+It does not build on its own. The interface asks for `solana-account-decoder
+>= 2` and calls `UiAccount::decode`, which 4.x removed, so a fresh resolve hands
+it a version it cannot compile against. Naming an older major in
+`[workspace.dependencies]` steers the graph off 4.x. `1.0.0-beta.0` needs none
+of that and builds with no change to our code; both were tried.

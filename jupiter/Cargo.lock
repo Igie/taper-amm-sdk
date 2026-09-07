@@ -3815,6 +3815,8 @@ dependencies = [
  "anyhow",
  "jupiter-amm-interface",
  "rust_decimal",
+ "serde_json",
+ "solana-account 3.4.0",
  "solana-account-decoder 2.3.13",
  "solana-pubkey 4.3.0",
  "taper-amm-sdk",

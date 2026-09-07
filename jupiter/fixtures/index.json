@@ -1,0 +1,13 @@
+[
+  "plain_x_to_y",
+  "plain_y_to_x",
+  "crosses_an_array_boundary",
+  "starts_on_an_empty_bin",
+  "partial_fill",
+  "quote_only_fee_x_to_y",
+  "quote_only_fee_y_to_x",
+  "after_a_quiet_period",
+  "transfer_fee_on_input",
+  "transfer_fee_on_output",
+  "transfer_fee_on_both"
+]
