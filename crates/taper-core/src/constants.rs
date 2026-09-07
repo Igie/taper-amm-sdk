@@ -11,8 +11,33 @@ pub const ONE_Q64: u128 = 1u128 << SCALE_OFFSET;
 
 /// Bins per `BinArray` account.
 pub const MAX_BIN_PER_ARRAY: usize = 70;
-/// Bins a single `Position` can span.
-pub const MAX_BIN_PER_POSITION: usize = 70;
+
+/// Bins whose per-bin data sits *inline* in the `Position` struct.
+///
+/// The struct is a fixed-size `Pod` and this is the length of its two arrays,
+/// so it is also the minimum a position account can be. Bins past it live in
+/// `PositionBinData` records appended to the same account, which is what
+/// leaves every byte offset below this point unchanged.
+pub const INLINE_BINS_PER_POSITION: usize = 70;
+
+/// Widest band a single `Position` may declare.
+///
+/// At [`POSITION_BIN_DATA_SIZE`] a bin, a full-width position is about 89 KB
+/// and 0.63 SOL of rent, so this is a ceiling rather than a target. It is
+/// DLMM's number, which is a useful thing for a client that supports both.
+pub const MAX_BIN_PER_POSITION: usize = 1_400;
+
+/// Bytes one bin past the inline block costs: a `u128` share plus a
+/// `PositionBinFee`.
+pub const POSITION_BIN_DATA_SIZE: usize = 64;
+
+/// Bins one `resize_position` may add. Shrinking is uncapped.
+///
+/// The runtime caps an account's growth at 10,240 bytes per transaction,
+/// measured against its length when the transaction began — so this is a
+/// *per transaction* limit, and two extends in one transaction still add at
+/// most this many bins between them.
+pub const MAX_BINS_PER_EXTEND: usize = 160;
 
 /// Basis-point denominator.
 pub const BASIS_POINT_MAX: u128 = 10_000;
@@ -48,5 +73,6 @@ pub const MAX_BINS_PER_SWAP: usize = 200;
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const POOL_SEED: &[u8] = b"pool";
 pub const BIN_ARRAY_SEED: &[u8] = b"bin_array";
-pub const POSITION_SEED: &[u8] = b"position";
+// A position has no seed: it is a plain keypair account, because its band
+// moves and there is nothing else about it worth encoding in an address.
 pub const RESERVE_SEED: &[u8] = b"reserve";

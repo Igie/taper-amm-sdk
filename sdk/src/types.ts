@@ -81,6 +81,22 @@ export type UpdateConfigParams = {
 
 export type BinDist = { binId: number; distributionX: number; distributionY: number };
 export type BinReduction = { binId: number; bps: number };
+/**
+ * One bin's part in a rebalance: what fraction of its shares to burn into
+ * the pot, and what share of that pot to place back into it.
+ *
+ * The two halves are independent — a bin may be drained and refilled at a
+ * different weight in the same call — which is why this is not a `BinDist`
+ * and a `BinReduction` side by side.
+ */
+export type BinRebalance = {
+  binId: number;
+  withdrawBps: number;
+  distributionX: number;
+  distributionY: number;
+};
+/** A bin's share of each side of a deposit, before it is quantised to bps. */
+export type BinWeight = { binId: number; weightX: number; weightY: number };
 
 export type PoolView = {
   config: PublicKey;
@@ -125,6 +141,16 @@ export type PositionView = {
   owner: PublicKey;
   lowerBinId: number;
   upperBinId: number;
+  /** Bins the band declares. Fixed at creation: it is in the PDA seed. */
+  width: number;
+  /**
+   * Bins the account currently has storage for, from its length.
+   *
+   * Below `width` while a wide position is still being extended. The per-bin
+   * arrays below cover `min(width, capacity)` bins, so a half-grown position
+   * reads as exactly what exists rather than as zeros that might be real.
+   */
+  capacity: number;
   lastUpdatedAt: bigint;
   totalClaimedFeeX: bigint;
   totalClaimedFeeY: bigint;

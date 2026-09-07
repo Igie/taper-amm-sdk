@@ -90,3 +90,34 @@ export function ix(
 export const seedI32 = (v: number) => new Writer().i32(v).bytes();
 export const seedU16 = (v: number) => new Writer().u16(v).bytes();
 export const seedI64 = (v: number) => new Writer().i64(v).bytes();
+
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Base58, for the one place this package needs it: a `memcmp` filter's
+ * `bytes`, which `getProgramAccounts` takes base58-encoded.
+ *
+ * Twelve lines rather than a dependency. `PublicKey` cannot stand in - it
+ * insists on 32 bytes, and an account discriminator is eight.
+ */
+export function base58(bytes: Uint8Array): string {
+  let leading = 0;
+  while (leading < bytes.length && bytes[leading] === 0) leading += 1;
+
+  const digits: number[] = [];
+  for (const byte of bytes.subarray(leading)) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i += 1) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+
+  // A leading zero byte is a leading "1", and carries no digit of its own.
+  return "1".repeat(leading) + digits.reverse().map((d) => BASE58[d]).join("");
+}

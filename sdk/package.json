@@ -1,7 +1,15 @@
 {
   "name": "@taper/sdk",
   "version": "0.1.0",
-  "description": "Client-side view of the taper-amm ABI: PDAs, instruction builders, account parsers, and an independent f64 ladder.",
+  "description": "Client-side view of the taper-amm ABI: PDAs, instruction builders, account parsers, a swap quote, and an independent f64 ladder. Transport free — no RPC layer.",
+  "license": "Apache-2.0",
+  "keywords": [
+    "solana",
+    "amm",
+    "dlmm",
+    "liquidity",
+    "taper"
+  ],
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

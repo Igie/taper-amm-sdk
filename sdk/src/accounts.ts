@@ -7,8 +7,15 @@
  * together. `ui/scripts/e2e.ts` is what catches a drift in this copy.
  */
 import { PublicKey } from "@solana/web3.js";
-import { ACCOUNT_LEN, MIN_BIN_ARRAY_INDEX } from "./constants";
-import { i32At, i64At, keyAt, u128At, u16At, u32At, u64At, u8At } from "./codec";
+import {
+  ACCOUNT_DISCRIMINATORS,
+  ACCOUNT_LEN,
+  INLINE_BINS_PER_POSITION,
+  MIN_BIN_ARRAY_INDEX,
+  POSITION_BIN_DATA_SIZE,
+  positionCapacityFor
+} from "./constants";
+import { base58, i32At, i64At, keyAt, u128At, u16At, u32At, u64At, u8At } from "./codec";
 import { binArrayLower } from "./pda";
 import { q64ToNumber } from "./ladder";
 import type { BinView, ConfigView, PoolView, PositionView } from "./types";
@@ -69,24 +76,50 @@ export function parsePool(d: Uint8Array): PoolView {
   };
 }
 
+/**
+ * Byte offset of a slot's share.
+ *
+ * The first `INLINE_BINS_PER_POSITION` bins live in the fixed struct's arrays;
+ * everything past them lives in 64-byte records appended to the account. That
+ * is what lets a position grow without a single offset below it moving.
+ */
+const shareOffset = (slot: number) =>
+  slot < INLINE_BINS_PER_POSITION
+    ? 72 + slot * 16
+    : ACCOUNT_LEN.position + (slot - INLINE_BINS_PER_POSITION) * POSITION_BIN_DATA_SIZE;
+
+/** The same for the fee record, which follows the share inside a record. */
+const feeOffset = (slot: number) =>
+  slot < INLINE_BINS_PER_POSITION
+    ? 1192 + slot * 48
+    : ACCOUNT_LEN.position + (slot - INLINE_BINS_PER_POSITION) * POSITION_BIN_DATA_SIZE + 16;
+
 export function parsePosition(d: Uint8Array): PositionView {
   const lowerBinId = i32At(d, 4576);
   const upperBinId = i32At(d, 4580);
   const width = upperBinId - lowerBinId + 1;
+  // Storage may cover less of the band than the band declares: a wide position
+  // is grown across several transactions, and one that is part way through is
+  // a perfectly ordinary thing to read. Report only what exists.
+  const capacity = positionCapacityFor(d.length);
+  const bins = Math.min(width, capacity);
+  const slots = Array.from({ length: bins }, (_, i) => i);
   return {
     pool: keyAt(d, 8),
     owner: keyAt(d, 40),
     lowerBinId,
     upperBinId,
+    width,
+    capacity,
     lastUpdatedAt: i64At(d, 4552),
     totalClaimedFeeX: u64At(d, 4560),
     totalClaimedFeeY: u64At(d, 4568),
-    shares: Array.from({ length: width }, (_, i) => u128At(d, 72 + i * 16)),
+    shares: slots.map((i) => u128At(d, shareOffset(i))),
     // PositionBinFee is 48 bytes: two Q64.64 checkpoints then the two pendings.
-    pendingFeeX: Array.from({ length: width }, (_, i) => u64At(d, 1192 + i * 48 + 32)),
-    pendingFeeY: Array.from({ length: width }, (_, i) => u64At(d, 1192 + i * 48 + 40)),
-    checkpointX: Array.from({ length: width }, (_, i) => u128At(d, 1192 + i * 48)),
-    checkpointY: Array.from({ length: width }, (_, i) => u128At(d, 1192 + i * 48 + 16))
+    pendingFeeX: slots.map((i) => u64At(d, feeOffset(i) + 32)),
+    pendingFeeY: slots.map((i) => u64At(d, feeOffset(i) + 40)),
+    checkpointX: slots.map((i) => u128At(d, feeOffset(i))),
+    checkpointY: slots.map((i) => u128At(d, feeOffset(i) + 16))
   };
 }
 
@@ -123,10 +156,18 @@ export function accruedFee(share: bigint, growth: bigint, checkpoint: bigint) {
 
 // --------------------------------------------- getProgramAccounts filters
 
-/** Positions this owner holds, optionally narrowed to one pool. */
+/**
+ * Positions this owner holds, optionally narrowed to one pool.
+ *
+ * The other three account types are filtered by `dataSize`. A position cannot
+ * be: it grows past its minimum as it is extended, so a size filter would
+ * return only the ones nobody widened. The discriminator is the stable
+ * identity instead — `sha256("account:Position")[..8]`, which is what Anchor
+ * writes into the first eight bytes.
+ */
 export function positionFilters(owner: PublicKey, pool?: PublicKey) {
   const filters: unknown[] = [
-    { dataSize: ACCOUNT_LEN.position },
+    { memcmp: { offset: 0, bytes: base58(Uint8Array.from(ACCOUNT_DISCRIMINATORS.position)) } },
     { memcmp: { offset: 40, bytes: owner.toBase58() } }
   ];
   if (pool) filters.push({ memcmp: { offset: 8, bytes: pool.toBase58() } });

@@ -51,6 +51,21 @@ pub fn withdraw_amounts(
         return Ok((0, 0));
     }
     require!(share <= supply, CoreError::MathOverflow);
+    if share == supply {
+        // The burner owns the whole bin, so the answer is everything in it —
+        // exactly, and without the two 256-bit divisions below. This is the
+        // mirror of the fast path in `deposit_shares` and it matters for the
+        // same reason: a share is a Q64.64 liquidity value, so `share *
+        // amount` overflows `u128` as soon as a bin holds a few million whole
+        // tokens, and a full-width withdrawal then pays for seventy wide
+        // divisions. Sole-LP bins are the common case away from the active
+        // price, and a full exit burns exactly `supply` in each of them.
+        //
+        // It does not make the slow path go away: a bin shared with another
+        // position still divides, so a client sizing the transaction has to
+        // budget for that. `tests/tests/compute.rs` measures both.
+        return Ok((amount_x, amount_y));
+    }
     let out_x = mul_div(share, amount_x as u128, supply)?;
     let out_y = mul_div(share, amount_y as u128, supply)?;
     Ok((
@@ -229,5 +244,40 @@ mod tests {
             composition_excess(500, 0, 0, 0, 0, minted).unwrap(),
             (0, 0)
         );
+    }
+
+    #[test]
+    fn burning_the_whole_supply_returns_the_whole_bin() {
+        // The fast path has to agree with the division it skips, including at
+        // magnitudes where that division is the only reason the slow path
+        // exists at all.
+        for (x, y) in [(0u64, 0u64), (1, 0), (0, 7), (1_000, 2_000)] {
+            let supply = bin_liquidity(x, y, ONE_Q64).unwrap().max(1);
+            assert_eq!(withdraw_amounts(supply, supply, x, y).unwrap(), (x, y));
+        }
+    }
+
+    #[test]
+    fn the_fast_path_matches_the_division_it_skips() {
+        // A bin holding two million whole tokens: `share * amount` is past
+        // `u128::MAX`, so without the shortcut this is two 256-bit divisions.
+        let amount = 2_000_000_000_000_000u64;
+        let supply = bin_liquidity(0, amount, ONE_Q64).unwrap();
+        assert!(supply.checked_mul(amount as u128).is_none(), "no longer wide");
+
+        assert_eq!(withdraw_amounts(supply, supply, 0, amount).unwrap(), (0, amount));
+        // One unit short of the whole supply takes the slow path and must land
+        // within a rounding unit of it, never above.
+        let (_, almost) = withdraw_amounts(supply - 1, supply, 0, amount).unwrap();
+        assert!(almost <= amount && almost >= amount - 1, "got {almost}");
+    }
+
+    #[test]
+    fn a_partial_burn_never_returns_more_than_its_share() {
+        let (x, y) = (1_000_000u64, 3_000_000u64);
+        let supply = bin_liquidity(x, y, ONE_Q64).unwrap();
+        let (hx, hy) = withdraw_amounts(supply / 2, supply, x, y).unwrap();
+        assert!(hx <= x / 2 && hy <= y / 2, "rounds against the burner");
+        assert!(hx >= x / 2 - 1 && hy >= y / 2 - 1);
     }
 }

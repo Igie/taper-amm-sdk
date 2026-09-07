@@ -113,7 +113,7 @@ function quote(fixture: Fixture) {
 describe("quoteSwap against real execution", () => {
   test("the fixture set is present", () => {
     expect(names.length).toBeGreaterThanOrEqual(11);
-    const files = readdirSync(FIXTURES).filter((f) => f !== "index.json");
+    const files = readdirSync(FIXTURES).filter((f) => f.endsWith(".json") && f !== "index.json");
     expect(files.length).toBe(names.length);
   });
 

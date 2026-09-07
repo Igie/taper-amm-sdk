@@ -1,4 +1,4 @@
-# Taper — client SDK and Jupiter integration
+# Taper — client SDKs and the Jupiter integration
 
 Taper is a discrete-bin AMM on Solana in the DLMM lineage, with a
 **non-constant bin step**: each bin is a fixed factor narrower than the one
@@ -6,17 +6,22 @@ below it, so the ladder tightens as price rises and the fee schedule is
 per-bin rather than per-pool.
 
 This repository is what a client needs to read a Taper pool and trade against
-it, and nothing else. Three crates:
+it, and nothing else. Three crates and one npm package:
 
-| crate | what it is |
+| package | what it is |
 | --- | --- |
 | [`crates/taper-core`](crates/taper-core) | the ladder, the swap walk, the fee schedule and the account layouts — the same code the on-chain program runs |
-| [`jupiter/taper-amm-sdk`](jupiter/taper-amm-sdk) | Taper from the outside: PDAs, account parsing, quotes, instruction builders |
+| [`jupiter/taper-amm-sdk`](jupiter/taper-amm-sdk) | Taper from the outside, in Rust: PDAs, account parsing, quotes, instruction builders |
 | [`jupiter/taper-jupiter`](jupiter/taper-jupiter) | `jupiter_amm_interface::Amm`, and nothing else |
+| [`sdk`](sdk) | `@taper/sdk` — the same surface in TypeScript, for wallets, front ends and scripts |
 
 ```powershell
 cd jupiter
 cargo test --locked
+
+cd ..\sdk
+bun install
+bun test
 ```
 
 `--locked` is not optional here; [`jupiter/README.md`](jupiter/README.md#interface-version-d2)
@@ -57,6 +62,34 @@ starting on an empty bin, a partial fill, quote-only fee mode both ways, a pool
 idle past its filter period, and Token-2022 transfer fees on each side and on
 both.
 
+## The TypeScript SDK
+
+[`sdk`](sdk) is the same program seen from JavaScript: PDAs, instruction
+builders, account parsers, an independent `f64` ladder, a swap quote, and the
+multi-transaction planner a wide position needs. It is deliberately **transport
+free** — no `Connection`, no RPC, no `fetch`. It builds instructions and parses
+bytes the caller fetched, which is what lets one build drive mainnet, devnet
+and a WebSocket-less local simulator without a branch.
+
+```ts
+import {
+  NETWORKS, PROGRAM_ID, poolPda, parsePool, quoteSwap, swapIx, minOutFor
+} from "@taper/sdk";
+```
+
+`network.ts` names mainnet, devnet and localnet with their default endpoints
+and explorer links. The program has **one address on every network**, so
+nothing in the package takes a cluster to derive an address — a network is a
+default endpoint and a warning about whether a mistake costs real money.
+
+Two of its tests are the reason it lives in this repository rather than one of
+its own. `sdk/test/parity.test.ts` checks the TypeScript quote against the same
+`jupiter/fixtures` the Rust quote is checked against, so the two are pinned to
+each other through real execution rather than to a shared expectation.
+`sdk/test/errors.test.ts` parses `crates/taper-core/src/errors.rs` and fails if
+the TypeScript error table drifts from the one the two Rust enums are generated
+from.
+
 ## One piece is Jupiter's to merge
 
 `jupiter_amm_interface::Swap` is a closed enum, so a Taper hop cannot be
@@ -80,5 +113,6 @@ this codebase already tracks four. The cost is that the cargo workspace is
 `jupiter/` rather than the root; the benefit is that what you fork is byte for
 byte what we build and test.
 
-The on-chain program, its tests, and the TypeScript SDK are not here. The
-program is deployed at `taperAJP7yuCyqnFUW3Xa3byvQ2YRY29w73NJrjYRUd`.
+The on-chain program and its tests are not here. The program is deployed at
+`taperAJP7yuCyqnFUW3Xa3byvQ2YRY29w73NJrjYRUd`, at that address on every
+cluster.

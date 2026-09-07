@@ -37,24 +37,26 @@ pub fn bin_array_pda(pool: &Pubkey, index: i32) -> Pubkey {
     pda(&[b"bin_array", pool.as_ref(), &(index as i64).to_le_bytes()])
 }
 
-pub fn position_pda(pool: &Pubkey, owner: &Pubkey, lower_bin_id: i32, width: u16) -> Pubkey {
-    pda(&[
-        b"position",
-        pool.as_ref(),
-        owner.as_ref(),
-        &lower_bin_id.to_le_bytes(),
-        &width.to_le_bytes(),
-    ])
-}
+// A position has no PDA: it is a plain keypair account, because its band moves
+// and an address derived from a band would be stale the moment it did. Nothing
+// here needs one anyway — a quote reads pools and bin arrays, never positions.
 
 /// How many bin arrays to carry either side of the active one.
 ///
 /// Two: the active bin's array, and one in the direction of travel. Measured
-/// in `tests/tests/compute.rs`, a hop costs about 12,400 CU per funded bin it
+/// in `tests/tests/compute.rs`, a hop costs about 12,200 CU per funded bin it
 /// crosses against a 1.4M transaction ceiling, which caps *any* Taper hop at
-/// roughly 110 bins — and two arrays cover between 71 and 140 of them,
-/// depending on where the active bin sits inside its own array. A third array
-/// can therefore never be reached by a swap that fits in a transaction at all.
+/// 113 bins — and two arrays cover between 71 and 140 of them, depending on
+/// where the active bin sits inside its own array.
+///
+/// So the third array is not unreachable in principle: with the active bin at
+/// the bottom of its own array, two cover only 71 and the budget would stretch
+/// to 113. It is unreachable in practice, which is the weaker claim this
+/// constant actually needs. A hop crossing 71 funded bins is ~7% of price
+/// impact on a 10 bps ladder, which no router quotes, and under the 300k a
+/// router really budgets the walk stops at 23 bins — inside the first array in
+/// the great majority of cases. Raising this to 3 would buy reach only for
+/// hops nothing would route, at 394 CU and 6,792 bytes of account per swap.
 pub const REACH: usize = 2;
 
 /// Bins per array, so a caller need not reach into `taper-core` for it.

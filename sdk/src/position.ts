@@ -101,11 +101,32 @@ export const hasLiquidity = (position: PositionView) => position.shares.some((s)
 /**
  * Bin-by-bin reductions in bps, for `remove_liquidity`.
  *
- * Only bins that hold shares are named: the program rejects a reduction that
- * would burn nothing, so sending an empty bin fails the whole instruction.
+ * Only bins that hold shares are named. The program skips an empty bin rather
+ * than rejecting it, so this is a saving in instruction bytes and compute, not
+ * a correctness guard — but a bin *outside* the position is a hard error
+ * (`BinIdOutsidePosition`), which is what `reductionsForRange` clamps against.
  */
 export const reductionsFor = (position: PositionView, bps: number) =>
   position.shares
     .map((share, i) => ({ binId: position.lowerBinId + i, bps, share }))
     .filter((r) => r.share > 0n)
     .map(({ binId, bps: b }) => ({ binId, bps: b }));
+
+/**
+ * The same, restricted to `[lower, upper]` — a partial withdrawal that leaves
+ * the rest of the position in place.
+ *
+ * `remove_liquidity` takes an arbitrary `(bin_id, bps)` list, so "withdraw the
+ * bins that fell below the active price" needs no new instruction: it is this
+ * list. The range is intersected with the position rather than validated
+ * against it, so a caller may pass a band wider than the position and get back
+ * only the bins that exist — an id outside the position would otherwise fail
+ * the whole instruction.
+ */
+export const reductionsForRange = (
+  position: PositionView,
+  lower: number,
+  upper: number,
+  bps: number
+) =>
+  reductionsFor(position, bps).filter((r) => r.binId >= lower && r.binId <= upper);

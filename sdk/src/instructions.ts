@@ -1,9 +1,16 @@
 /** One builder per program instruction, plus the account lists they share. */
 import { PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js";
-import { DISCRIMINATORS as DISC } from "./constants";
+import { DISCRIMINATORS as DISC, MAX_BINS_PER_EXTEND } from "./constants";
 import { ix, Writer } from "./codec";
-import { binArrayPda, configPda, poolPda, positionPda, reservePda } from "./pda";
-import type { BinDist, BinReduction, ConfigParams, TokenPair, UpdateConfigParams } from "./types";
+import { binArrayPda, configPda, poolPda, reservePda } from "./pda";
+import type {
+  BinDist,
+  BinRebalance,
+  BinReduction,
+  ConfigParams,
+  TokenPair,
+  UpdateConfigParams
+} from "./types";
 
 function mintKeys(t: TokenPair) {
   return [
@@ -113,10 +120,20 @@ export function initializeBinArrayIx(funder: PublicKey, pool: PublicKey, config:
   );
 }
 
+/**
+ * Opens a position at `position`, which is a **keypair the caller generates**
+ * and must sign this transaction with — a position is not a PDA, so there is
+ * nothing to derive and nothing to collide with.
+ *
+ * `width` may not exceed `INLINE_BINS_PER_POSITION`: the account is created at
+ * exactly that size, and a band is never allowed to declare range its account
+ * cannot hold. Anything wider is reached with `resizePositionIx`.
+ */
 export function initializePositionIx(
   owner: PublicKey,
   pool: PublicKey,
   config: PublicKey,
+  position: PublicKey,
   lowerBinId: number,
   width: number
 ) {
@@ -126,11 +143,95 @@ export function initializePositionIx(
       { pubkey: owner, isSigner: true, isWritable: true },
       { pubkey: pool, isSigner: false, isWritable: false },
       { pubkey: config, isSigner: false, isWritable: false },
-      { pubkey: positionPda(pool, owner, lowerBinId, width), isSigner: false, isWritable: true },
+      { pubkey: position, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
     ],
     new Writer().i32(lowerBinId).u16(width).bytes()
   );
+}
+
+/**
+ * Moves a position's band to `newLower ..= newUpper`, resizing its storage to
+ * match — widening, narrowing, or sliding it whole.
+ *
+ * Sliding both edges the same way is a **rebalance in place**: the position
+ * keeps its account, its fee checkpoints and its claim totals rather than
+ * being closed and reopened. Bins leaving the band must hold no shares and no
+ * unclaimed fee, or the program refuses with `ResizeDropsLiquidity`.
+ *
+ * **The arguments are a target, not a delta.** Re-sending is a no-op, so a
+ * runner that timed out can simply try again — the account's own length and
+ * header are the witness that it landed.
+ *
+ * At most `MAX_BINS_PER_EXTEND` bins may be *added* per call, and that budget
+ * is per *transaction* rather than per instruction: the runtime measures
+ * growth from the account's length when the transaction began, so two of these
+ * in one transaction share it. Send one per transaction. Shrinking is
+ * uncapped, and refunds the rent on the bytes it drops.
+ */
+export function resizePositionIx(
+  owner: PublicKey,
+  position: PublicKey,
+  pool: PublicKey,
+  config: PublicKey,
+  newLower: number,
+  newUpper: number
+) {
+  return ix(
+    DISC.resizePosition,
+    [
+      { pubkey: owner, isSigner: true, isWritable: true },
+      { pubkey: position, isSigner: false, isWritable: true },
+      { pubkey: pool, isSigner: false, isWritable: false },
+      { pubkey: config, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+    ],
+    new Writer().i32(newLower).i32(newUpper).bytes()
+  );
+}
+
+export type Band = { lower: number; upper: number };
+
+export const bandWidth = (b: Band) => b.upper - b.lower + 1;
+
+/**
+ * The successive bands that carry a position from `from` to `to`, one per
+ * transaction.
+ *
+ * The realloc ceiling is on the account's **length**, so what a step may spend
+ * is net width growth, not bins added at an edge: a band that sheds forty bins
+ * at the bottom while gaining forty at the top grows by nothing and is always
+ * one step. Narrowing is free, so each step sheds everything it is going to
+ * shed first and spends its whole budget widening.
+ *
+ * Every intermediate band contains `from ∩ to` — the bins that survive the
+ * move and may still hold liquidity — so no step drops a bin the target meant
+ * to keep. Returns `[]` when the position is already there.
+ */
+export function resizeSteps(from: Band, to: Band, step = MAX_BINS_PER_EXTEND): Band[] {
+  const out: Band[] = [];
+  let cur = from;
+  while (cur.lower !== to.lower || cur.upper !== to.upper) {
+    const room = bandWidth(cur) + step;
+    if (bandWidth(to) <= room) {
+      out.push(to);
+      break;
+    }
+    // Shed first: whatever the two bands share has to survive, and anything
+    // else the target does not want is free to drop now.
+    let lower = Math.max(cur.lower, to.lower);
+    let upper = Math.min(cur.upper, to.upper);
+    // A move clear of the old band keeps nothing, so it starts from a point.
+    if (lower > upper) [lower, upper] = [to.lower, to.lower];
+    let budget = room - (upper - lower + 1);
+    const down = Math.min(budget, lower - to.lower);
+    lower -= down;
+    budget -= down;
+    upper += Math.min(budget, to.upper - upper);
+    out.push({ lower, upper });
+    cur = { lower, upper };
+  }
+  return out;
 }
 
 /** The account list every `ModifyLiquidity` instruction shares. */
@@ -164,19 +265,90 @@ function modifyLiquidityKeys(a: LiquidityAccounts): TransactionInstruction["keys
   ];
 }
 
+/**
+ * Fills the gaps in a sorted, sparse bin list so it can be sent densely.
+ *
+ * The instruction carries one entry per consecutive bin from `firstBinId`, so a
+ * bin the caller left out becomes an explicit zero rather than a hole. That
+ * costs a few bytes for a shape with gaps and saves 280 on a full-width
+ * deposit, because the bin id every entry used to carry is now implied by its
+ * position in the list — and a zero is skipped by the program before it loads
+ * the bin at all.
+ */
+function densify<T>(entries: { binId: number }[], zero: T, at: (e: never) => T): { firstBinId: number; values: T[] } {
+  const sorted = [...entries].sort((l, r) => l.binId - r.binId);
+  if (!sorted.length) return { firstBinId: 0, values: [] };
+  const firstBinId = sorted[0].binId;
+  const span = sorted[sorted.length - 1].binId - firstBinId + 1;
+  const values: T[] = Array.from({ length: span }, () => zero);
+  for (const e of sorted) values[e.binId - firstBinId] = at(e as never);
+  return { firstBinId, values };
+}
+
 export function addLiquidityIx(a: LiquidityAccounts, amountX: bigint, amountY: bigint, dist: BinDist[]) {
-  const data = new Writer().u64(amountX).u64(amountY).u32(dist.length);
-  // The program requires strictly ascending bin ids.
-  for (const d of [...dist].sort((l, r) => l.binId - r.binId)) {
-    data.i32(d.binId).u16(d.distributionX).u16(d.distributionY);
-  }
+  const { firstBinId, values } = densify<[number, number]>(dist, [0, 0], (d: BinDist) => [
+    d.distributionX,
+    d.distributionY
+  ]);
+  const data = new Writer().u64(amountX).u64(amountY).i32(firstBinId).u32(values.length);
+  for (const [x, y] of values) data.u16(x).u16(y);
   return ix(DISC.addLiquidity, modifyLiquidityKeys(a), data.bytes());
 }
 
 export function removeLiquidityIx(a: LiquidityAccounts, reductions: BinReduction[]) {
-  const data = new Writer().u32(reductions.length);
-  for (const r of reductions) data.i32(r.binId).u16(r.bps);
+  const { firstBinId, values } = densify<number>(reductions, 0, (r: BinReduction) => r.bps);
+  const data = new Writer().i32(firstBinId).u32(values.length);
+  for (const bps of values) data.u16(bps);
   return ix(DISC.removeLiquidity, modifyLiquidityKeys(a), data.bytes());
+}
+
+/**
+ * Burns shares over a stretch of the band and redeposits the proceeds into
+ * the same stretch, at a new shape.
+ *
+ * **The deposit is quoted in bps of the pot, not in tokens.** What comes out
+ * of the bins is only knowable once the burn has run on chain, so there is no
+ * amount for a client to pass — which is the whole reason this exists rather
+ * than a `removeLiquidityIx` and an `addLiquidityIx` side by side. Those two
+ * force a client to predict the number in between: predict high and the
+ * deposit fails on a balance it does not have, taking the withdrawal down with
+ * it; predict low and the difference is stranded in the wallet.
+ *
+ * `depositX`/`depositY` top the pot up from the wallet before it is spent, and
+ * anything the distribution leaves unspent is paid back out — so one call
+ * covers a reshape, a reshape that adds, and a reshape that partially exits.
+ *
+ * `activeBounds` is the only slippage guard available here and is not
+ * decoration: the shape is computed against an active bin, and which side of
+ * it a bin falls on decides whether that bin may hold X or Y at all. Omit it
+ * only when the caller genuinely does not care where the price is.
+ */
+export function rebalanceLiquidityIx(
+  a: LiquidityAccounts,
+  entries: BinRebalance[],
+  options: {
+    depositX?: bigint;
+    depositY?: bigint;
+    compoundFees?: boolean;
+    activeBounds?: { min: number; max: number };
+  } = {}
+) {
+  const { firstBinId, values } = densify<[number, number, number]>(
+    entries,
+    [0, 0, 0],
+    (e: BinRebalance) => [e.withdrawBps, e.distributionX, e.distributionY]
+  );
+  const bounds = options.activeBounds ?? { min: -0x8000_0000, max: 0x7fff_ffff };
+  const data = new Writer()
+    .u64(options.depositX ?? 0n)
+    .u64(options.depositY ?? 0n)
+    .i32(firstBinId)
+    .i32(bounds.min)
+    .i32(bounds.max)
+    .u8(options.compoundFees ? 1 : 0)
+    .u32(values.length);
+  for (const [withdraw, x, y] of values) data.u16(withdraw).u16(x).u16(y);
+  return ix(DISC.rebalanceLiquidity, modifyLiquidityKeys(a), data.bytes());
 }
 
 export function claimFeeIx(a: LiquidityAccounts) {

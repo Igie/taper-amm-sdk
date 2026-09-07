@@ -4,7 +4,7 @@
  */
 import { PublicKey } from "@solana/web3.js";
 import { BINS_PER_ARRAY, MAX_BIN_ARRAY_INDEX, MIN_BIN_ARRAY_INDEX, PROGRAM_ID } from "./constants";
-import { seedI32, seedI64, seedU16 } from "./codec";
+import { seedI64, seedU16 } from "./codec";
 
 /**
  * Canonical mint order. The pool PDA is seeded with both mints, so X must sort
@@ -33,8 +33,11 @@ export const reservePda = (pool: PublicKey, mint: PublicKey) =>
 export const binArrayPda = (pool: PublicKey, index: number) =>
   pda([Buffer.from("bin_array"), pool.toBuffer(), seedI64(index)]);
 
-export const positionPda = (pool: PublicKey, owner: PublicKey, lowerBinId: number, width: number) =>
-  pda([Buffer.from("position"), pool.toBuffer(), owner.toBuffer(), seedI32(lowerBinId), seedU16(width)]);
+// A position has no PDA. It is a plain keypair account, because its band
+// moves — `resize_position` changes both edges — and an address derived from a
+// band would be stale the moment it did. Positions are found with
+// `getProgramAccounts` filtered on the owner, which is how clients have always
+// found them; the keypair is needed only to sign the account into existence.
 
 /** Floors towards -infinity, matching `i32::div_euclid` on chain. */
 export const binArrayIndex = (binId: number) => Math.floor(binId / BINS_PER_ARRAY);
@@ -59,6 +62,13 @@ export function arrayIndexesFor(lowerBinId: number, upperBinId: number) {
  * `reach` is how many arrays past the active one to carry. Three covers 210
  * bins, which is further than a single swap will normally travel, and each
  * extra array is 6,792 bytes of account the transaction has to reference.
+ *
+ * Compute is the real ceiling on how far the walk gets: about 12,200 CU per
+ * funded bin crossed against the 1.4M transaction limit caps any swap at 113
+ * bins, and 23 under the 300k a router budgets. Carrying an array the walk
+ * never reaches costs only 394 CU, which is why the Jupiter SDK trims to
+ * `REACH = 2` and this default does not — see `jupiter/taper-amm-sdk/src/pda.rs`.
+ * Both are measured by `swap_cost_by_reach` in `tests/tests/compute.rs`.
  */
 export function swapArrayIndexes(
   activeId: number,

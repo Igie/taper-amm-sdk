@@ -47,6 +47,14 @@ impl std::error::Error for ParseError {}
 /// Returns an owned copy rather than a borrow: every state struct is
 /// `#[repr(C, packed)]` and `Copy`, and an owned value is what a quote needs
 /// anyway, since the walk mutates as it goes.
+/// Reads one account's fixed header.
+///
+/// The length check is `<`, not `!=`, and that matters for exactly one of
+/// these types: a `Position` is 4,616 bytes of fixed struct plus one 64-byte
+/// record per bin past the inline 70, so a wide one is *longer* than its
+/// struct. Everything this crate needs from a position lives in the header,
+/// so reading it and ignoring the tail is correct rather than merely
+/// tolerant.
 fn parse<T: Pod>(data: &[u8], discriminator: [u8; 8]) -> Result<T, ParseError> {
     let expected = 8 + core::mem::size_of::<T>();
     if data.len() < expected {
@@ -173,6 +181,25 @@ mod tests {
         assert_eq!(8 + core::mem::size_of::<Config>(), 168);
         assert_eq!(8 + core::mem::size_of::<Pool>(), 432);
         assert_eq!(8 + core::mem::size_of::<BinArray>(), 6792);
+        // A *minimum* for this one: a position grows past its struct.
         assert_eq!(8 + core::mem::size_of::<Position>(), 4616);
+    }
+
+    /// A position wider than its inline block still parses.
+    ///
+    /// It is longer than the struct, which a length check written as `!=`
+    /// would reject - and the whole point of appending rather than
+    /// re-laying-out is that a client reading the header does not have to
+    /// care.
+    #[test]
+    fn a_grown_position_parses_from_its_header() {
+        let mut data = vec![0u8; 4616 + 130 * 64];
+        data[..8].copy_from_slice(&POSITION_DISCRIMINATOR);
+        data[4576..4580].copy_from_slice(&7i32.to_le_bytes());
+        data[4580..4584].copy_from_slice(&206i32.to_le_bytes());
+
+        let position = parse_position(&data).expect("a grown position");
+        let (lower, upper) = (position.lower_bin_id, position.upper_bin_id);
+        assert_eq!((lower, upper), (7, 206));
     }
 }

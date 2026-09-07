@@ -78,9 +78,6 @@ export class Ladder {
   }
 }
 
-/** A ladder read straight off a config account. */
-export const ladderOf = (config: Pick<ConfigParams, "baseWidthQ64" | "taperQ64">) =>
-  new Ladder(config.baseWidthQ64, config.taperQ64);
 
 /**
  * Mirrors `base_fee_rate` + `variable_fee_rate`, capped at `MAX_FEE_RATE`.
@@ -258,8 +255,22 @@ export function binIdForPrice(
   return dBelow < dLo ? below : lo;
 }
 
+/**
+ * What a lamport price has to be multiplied by to become a Y-per-X price a
+ * person would recognise.
+ *
+ * Every price this program stores is per *lamport pair* - the ladder is
+ * anchored at P(0) = 1.0 with no idea what a whole token is - so a pool of a
+ * 6-decimal mint against a 9-decimal one prices a thousand-fold away from
+ * anything a chart would show. The conversion belongs here rather than in each
+ * client for the ordinary reason: it is a property of the ABI, and four
+ * separate copies of the same exponent are four chances to subtract the wrong
+ * way round.
+ */
+export const priceScale = (decimalsX: number, decimalsY: number) => 10 ** (decimalsX - decimalsY);
+
 /** A bin's lamport price as a human-facing Y-per-X price. */
 export const displayPrice = (priceQ64OrNumber: bigint | number, decimalsX: number, decimalsY: number) => {
   const p = typeof priceQ64OrNumber === "bigint" ? q64ToNumber(priceQ64OrNumber) : priceQ64OrNumber;
-  return p * 10 ** (decimalsX - decimalsY);
+  return p * priceScale(decimalsX, decimalsY);
 };
