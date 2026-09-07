@@ -1,0 +1,21 @@
+[package]
+name = "taper-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Taper's price ladder, swap math and account layouts, free of Anchor"
+
+[features]
+default = []
+# Adds the ZeroCopy/Owner/Discriminator impls `AccountLoader` needs. Only
+# `taper-amm` turns this on; a Jupiter build takes the crate as it comes and
+# never links anchor-lang.
+anchor = ["dep:anchor-lang"]
+# `#[derive(Accounts)]` demands `IdlBuild` of every account type when the
+# program crate is built for IDL generation, so the impls have to exist here
+# too or `anchor build` does not compile at all.
+idl-build = ["anchor", "anchor-lang/idl-build"]
+
+[dependencies]
+bytemuck = { version = "1.21", features = ["derive", "min_const_generics"] }
+anchor-lang = { version = "0.31.1", optional = true }
