@@ -103,6 +103,26 @@ impl TaperAmm {
     }
 
     /// The arrays a swap in this direction may walk, as addresses.
+    ///
+    /// Named from `REACH` rather than from what a quote's walk actually
+    /// reached, which the Phase 1.2 measurements suggested doing. At
+    /// `REACH = 2` the two answers are the same, so there is nothing to trim.
+    ///
+    /// A trim would have to keep one array of margin beyond the walk whatever
+    /// it did: Jupiter builds the transaction from a quote, and by the time it
+    /// lands the volatility reference has decayed a little further — a lower
+    /// fee puts more of the input into the ladder and the walk goes further,
+    /// not less far — and another swap may have moved `active_id` outright. An
+    /// array the walk needs and was not handed ends it early, so the margin is
+    /// the difference between a full fill and a partial one.
+    ///
+    /// With that margin, a walk that stays in the active bin's array wants
+    /// `home` and the one beyond it, which is what `REACH` already names; and
+    /// a walk that crosses into the second array would want a third, which
+    /// `tests/tests/compute.rs` shows no swap fitting in a transaction can
+    /// reach. The second array costs 32 bytes and no contention — the pool
+    /// account is writable on every swap, so two swaps on one pool serialise
+    /// on that whatever their bin arrays say.
     fn swap_arrays(&self, swap_for_y: bool) -> Vec<Pubkey> {
         swap_array_indexes(
             self.pool.active_id,
