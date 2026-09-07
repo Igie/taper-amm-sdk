@@ -1,0 +1,29 @@
+# A fourth cargo workspace, for the same reason `tests/` and `localnet/` are
+# separate: `jupiter-amm-interface` drags in the Agave host tree, and that must
+# stay out of the SBF graph the program is compiled in.
+[workspace]
+resolver = "2"
+members = ["taper-amm-sdk", "taper-jupiter"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+taper-core = { path = "../crates/taper-core" }
+
+# D2, decided here so there is one line to change.
+#
+# `0.6.1` (Jan 2026) is the plan's default and what this builds against.
+# `1.0.0-beta.0` (Apr 2026) also builds, and needs no `solana-account-decoder`
+# pin - see the note beside that pin below. Neither choice reaches
+# `taper-core`, which depends on `bytemuck` and nothing else either way.
+jupiter-amm-interface = "0.6.1"
+
+# Not used by any of our code. `jupiter-amm-interface` 0.6.1 imports
+# `UiAccount::decode` from it, and `solana-account-decoder` 4.x removed that
+# method - so with the interface's own `>=2` requirement resolving to the
+# newest, the interface itself fails to compile. Pinning the major it was
+# written against is what fixes it. `1.0.0-beta.0` does not need this line.
+solana-account-decoder = "~2"

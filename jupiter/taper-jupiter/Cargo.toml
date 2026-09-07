@@ -1,0 +1,21 @@
+[package]
+name = "taper-jupiter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "jupiter_amm_interface::Amm for taper-amm"
+
+[features]
+default = []
+# Uses `Swap::Taper { swap_for_y }`, which the published
+# `jupiter-amm-interface` does not have. Build with this only against a
+# patched one; see `taper_swap` for why it is not the default.
+pending-swap-variant = []
+
+[dependencies]
+taper-amm-sdk = { path = "../taper-amm-sdk" }
+jupiter-amm-interface.workspace = true
+solana-account-decoder.workspace = true
+anyhow = "1"
+rust_decimal = "1.36"
+solana-pubkey = ">=2"

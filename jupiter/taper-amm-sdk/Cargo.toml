@@ -1,0 +1,20 @@
+[package]
+name = "taper-amm-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client-side Taper: PDAs, account parsing, quotes and instruction builders, without Anchor"
+
+[dependencies]
+taper-core.workspace = true
+bytemuck = "1.21"
+# The same requirement `jupiter-amm-interface` states, so cargo unifies these
+# to one version and `Pubkey` is the same type on both sides of the trait. A
+# tighter pin here would be a second version of `Pubkey` waiting to happen.
+solana-pubkey = { version = ">=2", features = ["curve25519", "sha2"] }
+solana-instruction = ">=2"
+
+[dev-dependencies]
+# Only to re-derive the discriminators the crate writes down.
+sha2 = "0.10"
+bytemuck = "1.21"
