@@ -1,0 +1,14 @@
+diff --git a/src/swap.rs b/src/swap.rs
+index 6035535..e25e82b 100644
+--- a/src/swap.rs
++++ b/src/swap.rs
+@@ -245,6 +245,9 @@ pub enum Swap {
+         a_to_b: bool,
+     },
+     TrendsSwap,
++    Taper {
++        swap_for_y: bool,
++    },
+ }
+ 
+ #[derive(Clone, PartialEq, Eq, Debug)]

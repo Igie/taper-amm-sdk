@@ -29,6 +29,7 @@ use jupiter_amm_interface::{
     SwapAndAccountMetas, SwapParams,
 };
 use rust_decimal::Decimal;
+use solana_instruction::AccountMeta;
 use solana_pubkey::Pubkey;
 
 use taper_amm_sdk::instructions::{swap_account_metas, SwapAccounts, FIXED_ACCOUNTS};
@@ -112,6 +113,27 @@ impl TaperAmm {
         .into_iter()
         .map(|index| bin_array_pda(&self.key, index))
         .collect()
+    }
+
+    /// The accounts a Taper hop names, in the program's order.
+    ///
+    /// Split out of [`Amm::get_swap_and_account_metas`] so that they are
+    /// observable in the build that ships today. That method cannot return
+    /// anything at all until `Swap::Taper` exists (see `taper_swap`), and
+    /// the claim that the metas either side of the missing variant are correct
+    /// should not have to wait on Jupiter to be checkable.
+    pub fn swap_account_metas(&self, swap_params: &SwapParams) -> Result<Vec<AccountMeta>> {
+        let swap_for_y = self.direction(&swap_params.source_mint, &swap_params.destination_mint)?;
+        Ok(swap_account_metas(
+            &SwapAccounts {
+                user: swap_params.token_transfer_authority,
+                pool: self.key,
+                user_token_in: swap_params.source_token_account,
+                user_token_out: swap_params.destination_token_account,
+            },
+            &self.pool,
+            &self.swap_arrays(swap_for_y),
+        ))
     }
 }
 
@@ -259,19 +281,9 @@ impl Amm for TaperAmm {
 
     fn get_swap_and_account_metas(&self, swap_params: &SwapParams) -> Result<SwapAndAccountMetas> {
         let swap_for_y = self.direction(&swap_params.source_mint, &swap_params.destination_mint)?;
-        let account_metas = swap_account_metas(
-            &SwapAccounts {
-                user: swap_params.token_transfer_authority,
-                pool: self.key,
-                user_token_in: swap_params.source_token_account,
-                user_token_out: swap_params.destination_token_account,
-            },
-            &self.pool,
-            &self.swap_arrays(swap_for_y),
-        );
         Ok(SwapAndAccountMetas {
             swap: taper_swap(swap_for_y)?,
-            account_metas,
+            account_metas: self.swap_account_metas(swap_params)?,
         })
     }
 

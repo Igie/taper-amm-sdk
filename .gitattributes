@@ -1,0 +1,4 @@
+# The patches in jupiter/upstream/ are applied to crates.io sources, which are
+# LF. With core.autocrlf=true git would check them out CRLF and `git apply`
+# would reject every hunk, so they are marked binary-ish rather than text.
+*.patch -text

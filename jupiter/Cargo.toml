@@ -24,7 +24,12 @@ jupiter-amm-interface = "0.6.1"
 # Not used by any of our code, and here only to steer resolution.
 # `jupiter-amm-interface` 0.6.1 calls `UiAccount::decode`, which
 # `solana-account-decoder` 4.x removed; the interface asks for `>= 2`, so a
-# fresh resolve hands it 4.x and the interface itself fails to compile. Naming
-# an older major here keeps the graph off 4.x - the interface then links
-# 3.1.14, which still has the method. `1.0.0-beta.0` needs none of this.
+# fresh resolve hands it 4.x and the interface itself fails to compile.
+#
+# This narrows what *we* link, which is as far as a requirement reaches: cargo
+# may still answer the interface's own `>= 2` with 4.x, and on a fresh resolve
+# it does. `Cargo.lock`, where the interface is recorded against 3.1.14, is
+# what actually holds the build together - so build `--locked`, and treat a
+# `cargo update` here as a change to re-verify. `1.0.0-beta.0` needs none of
+# this.
 solana-account-decoder = "~2"

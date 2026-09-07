@@ -1,0 +1,14 @@
+diff --git a/src/swap.rs b/src/swap.rs
+index 5274210..1644d53 100644
+--- a/src/swap.rs
++++ b/src/swap.rs
+@@ -178,6 +178,9 @@ pub enum Swap {
+     GoonFiV2 {
+         is_bid: bool,
+     },
++    Taper {
++        swap_for_y: bool,
++    },
+ }
+ 
+ #[derive(Clone, PartialEq, Eq, Debug)]

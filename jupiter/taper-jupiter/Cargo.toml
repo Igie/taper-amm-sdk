@@ -19,6 +19,12 @@ solana-account-decoder.workspace = true
 anyhow = "1"
 rust_decimal = "1.36"
 solana-pubkey = ">=2"
+# For `AccountMeta`, which `jupiter-amm-interface` names in its own signatures
+# but does not re-export. Pinned to the major it links, not to its `>=2`: the
+# `solana-account-decoder = "~2"` pin above puts a 2.x `solana-instruction` in
+# the graph too, and cargo answers `>=2` with that one - leaving two
+# `AccountMeta` types and a `Vec` that will not cross the trait boundary.
+solana-instruction = "3"
 
 [dev-dependencies]
 # The parity fixtures are JSON snapshots. Test-only: none of this reaches a

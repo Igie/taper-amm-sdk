@@ -3818,6 +3818,7 @@ dependencies = [
  "serde_json",
  "solana-account 3.4.0",
  "solana-account-decoder 2.3.13",
+ "solana-instruction 3.5.0",
  "solana-pubkey 4.3.0",
  "taper-amm-sdk",
 ]

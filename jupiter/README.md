@@ -11,8 +11,9 @@ program compiles in — the same reason `tests/` and `localnet/` are separate.
 
 ```powershell
 cd jupiter
-cargo test
+cargo test --locked                           # see "Interface version" for the --locked
 cargo tree -e normal | Select-String anchor   # nothing, and that is the point
+cd ..; ./scripts/verify-swap-variant.ps1      # the half of it Jupiter has to merge
 ```
 
 ## The one idea
@@ -61,8 +62,20 @@ Jupiter's repository.**
 Failing is deliberate. Borrowing another DEX's variant would compile and look
 finished, and then have Jupiter build a CPI against a different program's
 instruction layout — a malformed transaction rather than an honest "not yet".
-Against a patched interface, `--features pending-swap-variant` switches to the
-real variant; everything either side of it is done and tested.
+
+Everything either side of it is tested in both builds. The metas are reachable
+without the variant, through `TaperAmm::swap_account_metas`, so
+`tests/swap_variant.rs` checks them in the build that ships today: the eleven
+fixed accounts against the pool's own, the arrays in travel order, and that no
+hop names more accounts than `get_accounts_len` declared. The same file asserts
+the gate reports its own absence, and — under `pending-swap-variant` — that the
+variant carries the direction.
+
+[`upstream/`](upstream/) holds the patch we are asking Jupiter to take, for
+both interface versions, plus what an aggregator needs to dispatch it.
+`./scripts/verify-swap-variant.ps1` applies it to a copy of the published crate
+and runs the feature build against it, so "one line to change" is a tested
+claim. Both versions pass.
 
 ## Interface version (D2)
 
@@ -74,6 +87,20 @@ Chosen because it is what `jup-ag/jupiter-amm-implementation` itself pins:
 
 It does not build on its own. The interface asks for `solana-account-decoder
 >= 2` and calls `UiAccount::decode`, which 4.x removed, so a fresh resolve hands
-it a version it cannot compile against. Naming an older major in
-`[workspace.dependencies]` steers the graph off 4.x. `1.0.0-beta.0` needs none
-of that and builds with no change to our code; both were tried.
+it a version it cannot compile against. `1.0.0-beta.0` needs none of that and
+builds with no change to our code; both were tried.
+
+**`Cargo.lock` is what holds that together, and it is load-bearing.** The
+`solana-account-decoder = "~2"` line below is a steer, not a constraint: it
+fixes the version *we* link, and cargo is free to answer the interface's own
+`>= 2` with a different one. Delete the lock and `cargo generate-lockfile`
+takes both — 2.3.13 for us, 4.1.2 for the interface — and the build fails in
+the interface, on `UiAccount`. So **build this workspace `--locked`**, and treat
+a `cargo update` here as a change that has to be re-verified rather than a
+routine one. Jupiter's own harness works the same way, locking
+`solana-account-decoder` at `2.2.19`.
+
+The same loose `>= 2` requirements are why `scripts/verify-swap-variant.ps1`
+pins the patched copy's dependencies to what the lock already resolved: patching
+a package re-resolves *its* dependencies, and left alone the interface lands on
+a different `Pubkey` and `AccountMeta` than our crates.
