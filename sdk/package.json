@@ -1,0 +1,33 @@
+{
+  "name": "@taper/sdk",
+  "version": "0.1.0",
+  "description": "Client-side view of the taper-amm ABI: PDAs, instruction builders, account parsers, and an independent f64 ladder.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.4"
+  },
+  "devDependencies": {
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.2"
+  }
+}

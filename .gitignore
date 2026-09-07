@@ -1,0 +1,16 @@
+target/
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+# Program keypairs, at any depth: `keys/*.json` alone is anchored at the root
+# and would leave `_archive/keys/` exposed.
+**/keys/*.json
+!**/keys/README.md
+# A stray copy of the taperAJP7... program keypair. Nothing reads it; it is
+# ignored rather than deleted so removing it stays the owner's call.
+/taper.json
+.anchor/
+test-ledger/
