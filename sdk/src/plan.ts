@@ -1,17 +1,22 @@
 /**
  * Multi-transaction plans.
  *
- * A band of any interesting width is several transactions, for two independent
- * reasons and they bind at different places. **The packet** caps how many bins
- * one `add_liquidity` can carry: a transaction is 1,232 bytes and the account
- * list eats 513 of them, so a distribution runs out of room around 70 entries.
- * **The account** caps how many bins one position can *hold* at creation: 70
- * inline, and the rest arrive through `resize_position`, one call per
- * transaction because the runtime limits an account's growth to 10,240 bytes
- * per transaction.
+ * A band of any interesting width is several transactions, and **the packet**
+ * is what decides how many: a transaction is 1,232 bytes and `add_liquidity`
+ * spends 513 of them on its account list, so a distribution runs out of room
+ * around 70 entries.
  *
- * So a 300-bin position is: open it, grow it twice, then deposit into it four
- * times. Everything here exists to make that fan-out survivable — a sequence
+ * The account used to be a second, independent ceiling — a position was opened
+ * at its 70 inline bins and climbed to its band through `resize_position`, one
+ * call per transaction. It is not any more: the client allocates the account
+ * itself with a top-level `create_account`, which the runtime does not cap the
+ * way it caps the 10,240 bytes a **CPI** may allocate, so a position of any
+ * width is open and fully allocated in its first transaction. `resize_position`
+ * is still how a band *moves* — see `planRebalance` — and a deposit only ever
+ * emits one to widen a position that already exists.
+ *
+ * So a 300-bin position is: open it and fill the first chunk, then fill three
+ * more. Everything here exists to make that fan-out survivable — a sequence
  * that dies on transaction three must not leave the user guessing which of
  * their money moved.
  *
@@ -61,6 +66,7 @@ import {
   closePositionIx,
   initializeBinArrayIx,
   initializePositionIx,
+  openPositionIxs,
   rebalanceLiquidityIx,
   removeLiquidityIx,
   resizePositionIx,
@@ -178,7 +184,12 @@ export const CU_HEADROOM_NATIVE = 35_000;
 export const CU = {
   /** Measured 7.6k. */
   initBinArray: 15_000,
-  /** Measured 9.3k. */
+  /**
+   * Measured 3.5k — it allocates nothing, the account arriving already created
+   * by the client's `create_account`, which is a few hundred more. The margin
+   * is left where it was: over-asking costs a little priority fee and
+   * under-asking costs the transaction.
+   */
   initPosition: 15_000,
   /** A realloc and at most one lamport transfer. */
   /**
@@ -439,7 +450,13 @@ export function widthThatFits(
   const size = transactionSize(
     [
       ...arrayIxs(accounts, arrays, new Set()),
-      initializePositionIx(accounts.owner, accounts.pool, accounts.config, position, 0, bins),
+      // The whole opening pair: the client allocates the account and the
+      // program declares the band over it. The `create_account` adds 57 bytes
+      // — 14 bins of table — and only the opening chunk pays for it, which is
+      // the same reason `opening` exists at all.
+      ...(opening
+        ? openPositionIxs(accounts.owner, accounts.pool, accounts.config, position, 0, bins)
+        : [initializePositionIx(accounts.owner, accounts.pool, accounts.config, position, 0, bins)]),
       addLiquidityIx(liquidityAccounts(accounts, position, arrays), 0n, 0n, probe)
     ],
     accounts.owner,
@@ -514,10 +531,11 @@ export type PositionPlan = {
   /** The band the position spans right now, which `resize_position` moves. */
   band: Band;
   /**
-   * Bins it has storage for today. `INLINE_BINS_PER_POSITION` for one this
-   * plan opens, and for an existing one whose capacity the caller did not
-   * supply — an unnecessary `resize_position` is a no-op, so guessing low is
-   * safe where guessing high would leave a deposit with nowhere to land.
+   * Bins it has storage for today. The whole band for one this plan opens,
+   * which allocates the account to fit it; `INLINE_BINS_PER_POSITION` for an
+   * existing one whose capacity the caller did not supply — an unnecessary
+   * `resize_position` is a no-op, so guessing low is safe where guessing high
+   * would leave a deposit with nowhere to land.
    */
   capacity: number;
   /** Bytes the account occupies once it covers the whole band. */
@@ -556,6 +574,20 @@ export type DepositPlan = {
 
 export type DepositInput = {
   accounts: BaseAccounts;
+  /**
+   * The stretch that receives liquidity — which is not always a band.
+   *
+   * For a position being opened the two are the same thing: the account is
+   * created spanning exactly this. For one that already exists it is the part
+   * of its band this deposit fills, and the band is left where it is. So a
+   * caller narrowing a deposit to a few bins of a position it already holds
+   * passes those bins and gets one `add_liquidity` over them, not a second
+   * position and not a resize.
+   *
+   * The shape is laid out over this stretch and normalised against it, so a
+   * narrower range is a *different deposit*, not a filtered one — 100% of the
+   * amounts goes into the bins named here.
+   */
   lower: number;
   upper: number;
   activeId: number;
@@ -563,6 +595,18 @@ export type DepositInput = {
   amountY: bigint;
   shape: Shape;
   spotBlendBps?: number;
+  /**
+   * What the active bin already holds, as a fraction of its value in X — read
+   * off the bin with `compositionXShare`.
+   *
+   * The active bin is the only one that may hold both tokens, and a deposit
+   * that shifts its mix pays the composition fee, which is a swap fee. Telling
+   * the planner the mix lets it land the deposit *in* that ratio instead of at
+   * whatever ratio the caller's two amounts happen to be in. Omit it and the
+   * bin is treated as empty (0.5), which is the case where no composition fee
+   * exists to avoid.
+   */
+  activeXShare?: number;
   /** Bin-array indexes known to exist. */
   existingArrays?: Iterable<number>;
   /**
@@ -570,9 +614,11 @@ export type DepositInput = {
    *
    * Bands rather than addresses, because a position's address derives from
    * nothing: the planner matches an existing position to a spec by the band it
-   * currently spans. `capacity` is only an optimisation — omit it and the
-   * inline block is assumed, which at worst adds `resize_position` calls that
-   * turn out to be no-ops. `parsePosition` reports all three.
+   * currently spans, or by *containing* it — a deposit into a stretch of a
+   * band the owner already holds goes into that position. `capacity` is only
+   * an optimisation — omit it and the inline block is assumed, which at worst
+   * adds `resize_position` calls that turn out to be no-ops. `parsePosition`
+   * reports all three.
    */
   existingPositions?: Iterable<{
     address: PublicKey;
@@ -619,17 +665,31 @@ export function planDeposit(input: DepositInput): DepositPlan {
     amountY,
     shape,
     spotBlendBps = 0,
+    activeXShare = 0.5,
     strategy = "packed",
     maxPositionWidth = MAX_BINS_PER_POSITION,
     headroom = TX_HEADROOM
   } = input;
   const existingArrays = new Set(input.existingArrays ?? []);
-  // Keyed by band, because that is all a position's identity consists of now.
-  const held = new Map(
-    [...(input.existingPositions ?? [])].map((p) => [`${p.lowerBinId}:${p.upperBinId}`, p])
-  );
+  /*
+   * The position a spec deposits into, matched by band because that is all a
+   * position's identity consists of now.
+   *
+   * Exact first, then *containment*. A deposit aimed at a stretch of a band
+   * the owner already holds is an ordinary add to that position: the range
+   * says which bins receive liquidity, not which bins a position spans. Asking
+   * only the exact question opened a second position over the same bins —
+   * paying its rent, splitting the band's fees across two accounts and leaving
+   * the ladder drawing two overlapping bands — the moment a caller narrowed
+   * the range to part of a position it already had.
+   */
+  const owned = [...(input.existingPositions ?? [])];
+  const held = new Map(owned.map((p) => [`${p.lowerBinId}:${p.upperBinId}`, p]));
+  const positionFor = (spec: PositionSpec) =>
+    held.get(`${spec.lowerBinId}:${spec.upperBinId}`) ??
+    owned.find((p) => p.lowerBinId <= spec.lowerBinId && p.upperBinId >= spec.upperBinId);
 
-  const weights = weightsFor(lower, upper, activeId, shape, spotBlendBps);
+  const weights = weightsFor(lower, upper, activeId, shape, spotBlendBps, activeXShare);
   const byBin = new Map(weights.map((w) => [w.binId, w]));
   const specs = splitRange(lower, upper, strategy, maxPositionWidth);
   // How many bins one deposit transaction may carry. Independent of how wide
@@ -661,10 +721,11 @@ export function planDeposit(input: DepositInput): DepositPlan {
     const rows = preview(dist, xAmounts[i], yAmounts[i]);
     if (!rows.some((r) => r.amountX > 0n || r.amountY > 0n)) return;
 
-    const existing = held.get(`${spec.lowerBinId}:${spec.upperBinId}`);
-    // A position opens inside the inline block whatever the spec asks for:
-    // `initialize_position` will not declare a band the account cannot hold,
-    // and the rest of the band arrives through `resize_position`.
+    const existing = positionFor(spec);
+    // A position opens at its **whole** band. The client allocates the account
+    // with a top-level `create_account`, which the runtime does not cap the way
+    // it caps a CPI, so there is no climb from the inline block and no
+    // `resize_position` on the opening path at any width.
     const keypair = existing ? undefined : Keypair.generate();
     positions.push({
       spec,
@@ -673,11 +734,8 @@ export function planDeposit(input: DepositInput): DepositPlan {
       exists: Boolean(existing),
       band: existing
         ? { lower: existing.lowerBinId, upper: existing.upperBinId }
-        : {
-            lower: spec.lowerBinId,
-            upper: spec.lowerBinId + Math.min(spec.width, INLINE_BINS_PER_POSITION) - 1
-          },
-      capacity: existing?.capacity ?? INLINE_BINS_PER_POSITION,
+        : { lower: spec.lowerBinId, upper: spec.lowerBinId + spec.width - 1 },
+      capacity: existing?.capacity ?? spec.width,
       bytes: positionLenFor(spec.width),
       amountX: xAmounts[i],
       amountY: yAmounts[i],
@@ -692,13 +750,45 @@ export function planDeposit(input: DepositInput): DepositPlan {
     // the split invisible on chain: `add_liquidity` places
     // `amount * bps / 10_000` per bin, so four calls with a quarter of the
     // table each place exactly what one call with all of it would have.
+    /*
+     * A chunk cut down to the bins that actually receive something.
+     *
+     * Asked of the amounts rather than of the bps, because a one-sided deposit
+     * into a range that spans the active bin leaves a whole side's bps
+     * pointing at nothing: the shape still weights the Y bins, but with no Y
+     * to place they all round to zero. The program skips such a bin *before*
+     * it reaches for the bin's array, so carrying them buys nothing and costs
+     * the rent of every array they span — 6,792 bytes each.
+     *
+     * Only the ends are trimmed. The table has to stay one contiguous run —
+     * `add_liquidity` sends a first bin id and steps forward — and an interior
+     * zero is a bin the caller deliberately skipped.
+     */
+    const trim = (slice: BinDist[]) => {
+      const rows = preview(slice, p.amountX, p.amountY);
+      const placed = (i: number) => rows[i].amountX > 0n || rows[i].amountY > 0n;
+      let first = 0;
+      while (first < rows.length && !placed(first)) first += 1;
+      if (first === rows.length) return [];
+      let last = rows.length - 1;
+      while (!placed(last)) last -= 1;
+      return slice.slice(first, last + 1);
+    };
+
     const chunks: BinDist[][] = [];
     for (let at = 0; at < p.dist.length; ) {
-      const width = chunks.length === 0 && !p.exists ? openWidth : chunkWidth;
+      // The chunk that *opens* the position carries `initialize_position`, and
+      // the account is created spanning its own first bin — so promoting a
+      // later chunk to opener would deposit outside the band it was opened
+      // with. It is kept even when it places nothing, and then carries the
+      // initialisation alone.
+      const opens = chunks.length === 0 && !p.exists;
+      const width = opens ? openWidth : chunkWidth;
       const slice = p.dist.slice(at, at + width);
       at += width;
-      // A slice that places nothing is not worth a signature.
-      if (slice.some((d) => d.distributionX > 0 || d.distributionY > 0)) chunks.push(slice);
+      const placed = trim(slice);
+      if (placed.length) chunks.push(placed);
+      else if (opens) chunks.push(slice);
     }
     if (!chunks.length) continue;
 
@@ -714,14 +804,25 @@ export function planDeposit(input: DepositInput): DepositPlan {
 
     chunks.forEach((dist, index) => {
       const opening = !p.exists && index === 0;
-      const arrayIndexes = arraysFor(dist);
-      const accountsFor = liquidityAccounts(accounts, p.address, arrayIndexes);
       const { x, y } = spend(dist);
+      // The one chunk kept without placing anything is the opener of a
+      // one-sided deposit, and it needs neither the deposit instruction nor
+      // the bin arrays it would have deposited into — an array is 6,792 bytes
+      // of rent, and paying it for bins nothing lands in is money for nothing.
+      // The band still spans them; whoever funds them later rents them then.
+      const fills = x > 0n || y > 0n;
+      const arrayIndexes = fills ? arraysFor(dist) : [];
+      const accountsFor = liquidityAccounts(accounts, p.address, arrayIndexes);
       const first = dist[0].binId;
       const last = dist[dist.length - 1].binId;
 
       steps.push({
-        id: `deposit:${key}:${index}`,
+        // The spec's own first bin, not just the position's address: two
+        // stretches can now land in one position, and the runner keys "already
+        // done" off this id — a collision would skip a deposit rather than
+        // send it. Stable across re-plans of the same band, which is what the
+        // id is for.
+        id: `deposit:${key}:${p.spec.lowerBinId}:${index}`,
         kind: opening ? "openPosition" : "addLiquidity",
         label: opening
           ? `Open bins ${p.spec.lowerBinId}…${p.spec.upperBinId}`
@@ -730,7 +831,7 @@ export function planDeposit(input: DepositInput): DepositPlan {
           MAX_TX_COMPUTE,
           arrayIndexes.length * CU.initBinArray +
             (opening ? CU.initPosition : 0) +
-            CU.addLiquidity(dist.length)
+            (fills ? CU.addLiquidity(dist.length) : 0)
         ),
         binArrays: arrayIndexes,
         // Only an opening step is provably re-runnable: the position it creates
@@ -747,26 +848,40 @@ export function planDeposit(input: DepositInput): DepositPlan {
         build: (existing) => [
           ...arrayIxs(accounts, arrayIndexes, existing),
           ...(opening
-            ? [
-                initializePositionIx(
-                  accounts.owner,
-                  accounts.pool,
-                  accounts.config,
-                  p.address,
-                  p.band.lower,
-                  bandWidth(p.band)
-                )
-              ]
+            ? openPositionIxs(
+                accounts.owner,
+                accounts.pool,
+                accounts.config,
+                p.address,
+                p.band.lower,
+                bandWidth(p.band)
+              )
             : []),
-          addLiquidityIx(accountsFor, p.amountX, p.amountY, dist)
+          ...(fills ? [addLiquidityIx(accountsFor, p.amountX, p.amountY, dist)] : [])
         ]
       });
     });
 
-    // Growth goes between the opening step and the rest, because a deposit
-    // into a bin the band does not reach yet is refused. One band per
-    // transaction; each is absolute, so a retry is a no-op.
-    const target: Band = { lower: p.spec.lowerBinId, upper: p.spec.upperBinId };
+    // Growth, if the band ever needs any. It does not today: a new position is
+    // allocated at its whole band, and an existing one is matched only by
+    // holding the stretch already, so the union below is always the band the
+    // position is on and `resizeSteps` returns nothing. The union is what makes
+    // that safe rather than accidental — `resize_position` takes an absolute
+    // band, so aiming it at a stretch *inside* the band would shrink the
+    // position to it and be refused as `ResizeDropsLiquidity`, failing a
+    // deposit that had no business resizing anything. Keep it: it is the guard
+    // that would catch a looser match, not a step the planner is expected to
+    // emit.
+    //
+    // Where it does land it goes between the opening step and the rest,
+    // because a deposit into a bin the band does not reach yet is refused. One
+    // band per transaction; each is absolute, so a retry is a no-op.
+    const target: Band = p.exists
+      ? {
+          lower: Math.min(p.band.lower, p.spec.lowerBinId),
+          upper: Math.max(p.band.upper, p.spec.upperBinId)
+        }
+      : { lower: p.spec.lowerBinId, upper: p.spec.upperBinId };
     const growth: Step[] = resizeSteps(p.band, target).map((band) => ({
       id: `resize:${key}:${band.lower}:${band.upper}`,
       kind: "resizePosition",
@@ -795,7 +910,13 @@ export function planDeposit(input: DepositInput): DepositPlan {
     kind: "deposit",
     activeId,
     positions,
-    missingArrays: arrayIndexesFor(lower, upper).filter((index) => !existingArrays.has(index)),
+    // The arrays this plan will actually create, which is not the same as the
+    // arrays the range spans: a one-sided deposit rents none on the side it
+    // left empty. Callers price rent off this, so it has to be the narrower
+    // answer or the estimate charges for bins nothing lands in.
+    missingArrays: [...new Set(steps.flatMap((step) => step.binArrays))]
+      .filter((index) => !existingArrays.has(index))
+      .sort((a, b) => a - b),
     steps,
     allocatedX: positions.reduce((a, p) => a + p.amountX, 0n),
     allocatedY: positions.reduce((a, p) => a + p.amountY, 0n),
@@ -810,6 +931,15 @@ export type ExitPlan = {
   steps: Step[];
   /** Positions this plan closes, refunding their whole rent. */
   closing: number;
+  /**
+   * Bins this plan burns shares in, summed over its positions.
+   *
+   * Not the width of the range asked for: a range is *intersected* with each
+   * position, and a bin holding nothing is left out of the table rather than
+   * sent as a zero. A caller narrowing a withdrawal on a chart reads this to
+   * say how much of the selection actually holds liquidity.
+   */
+  bins: number;
 };
 
 export type ExitInput = {
@@ -817,7 +947,18 @@ export type ExitInput = {
   positions: { address: PublicKey; view: PositionView }[];
   /** Bps of each bin's shares to burn. */
   bps: number;
-  /** Restrict the withdrawal to these bins; omit for the whole position. */
+  /**
+   * Restrict the withdrawal to these bins; omit for the whole position.
+   *
+   * Intersected with each position rather than validated against it, so one
+   * range may be aimed at several positions of different bands and each gives
+   * up only the bins it actually holds — a bin id outside a position would
+   * otherwise fail that whole instruction. A range that misses a position
+   * entirely leaves it alone.
+   *
+   * A ranged withdrawal never closes, whatever `close` says: the bins outside
+   * it keep their shares, so the position is not empty afterwards.
+   */
   range?: { lower: number; upper: number };
   /**
    * Close each position once it is emptied. Only legal at a full withdrawal
@@ -839,6 +980,14 @@ export type ExitInput = {
  * so a position emptied without claiming is left holding a pending balance it
  * cannot be closed with — which is the state that strands rent.
  *
+ * **A range narrows it to a stretch of bins**, which needs no new instruction
+ * — `remove_liquidity` has always taken an arbitrary `(bin_id, bps)` list, and
+ * a range is just which part of the position that list is built from. It is
+ * how "take back everything the price has left behind" is spelled, and how a
+ * position sheds one edge without giving up the rest. The chunking, the claim
+ * and the compute estimate all follow the bins actually being burned, so a
+ * narrow withdrawal out of a wide position is one small transaction.
+ *
  * A wide position is several transactions here too, and for the same two
  * reasons a deposit is: the dense bps table and the bin arrays both grow with
  * the range. Each step withdraws from one chunk of bins and claims over that
@@ -854,14 +1003,22 @@ export function planExit(input: ExitInput): ExitPlan {
   const chunkWidth = widthThatFits(accounts, headroom, false);
 
   const steps: Step[] = [];
+  let bins = 0;
   for (const { address, view } of positions) {
     const reductions = range
       ? reductionsForRange(view, range.lower, range.upper, bps)
       : reductionsFor(view, bps);
     const hasPending =
       view.pendingFeeX.some((f) => f > 0n) || view.pendingFeeY.some((f) => f > 0n);
-    if (!reductions.length && !hasPending && !close) continue;
+    // A ranged withdrawal that finds no shares in its range does nothing at
+    // all — not even a claim. The claim below rides along with a withdrawal
+    // because a withdrawal checkpoints a fee on its way out; with no bins to
+    // burn there is nothing to checkpoint, and sweeping the whole position's
+    // fees is not what a caller who drew a box round five bins asked for.
+    // Claiming remains its own operation.
+    if (!reductions.length && (range || (!hasPending && !close))) continue;
 
+    bins += reductions.length;
     const key = address.toBase58();
 
     // Chunks are cut over the *claimable* span rather than only the bins being
@@ -907,7 +1064,7 @@ export function planExit(input: ExitInput): ExitPlan {
     });
   }
 
-  return { kind: "exit", steps, closing: close ? positions.length : 0 };
+  return { kind: "exit", steps, closing: close ? positions.length : 0, bins };
 }
 
 // ------------------------------------------------------------ rebalancing
@@ -1132,6 +1289,12 @@ export type ReshapeInput = {
   shape: Shape;
   spotBlendBps?: number;
   /**
+   * What the active bin already holds, as a fraction of its value in X. See
+   * the field of the same name on {@link DepositInput}; a reshape redeposits
+   * through the same guards and pays the same composition fee.
+   */
+  activeXShare?: number;
+  /**
    * The stretch of the band to reshape. Defaults to the whole of it.
    *
    * Bins outside it are left exactly as they are — shares, fee checkpoints and
@@ -1202,6 +1365,7 @@ export function planReshape(input: ReshapeInput): ReshapePlan {
     activeId,
     shape,
     spotBlendBps = 0,
+    activeXShare = 0.5,
     depositX = 0n,
     depositY = 0n,
     compoundFees = false,
@@ -1234,7 +1398,7 @@ export function planReshape(input: ReshapeInput): ReshapePlan {
   for (let at = range.lower, index = 0; at <= range.upper; at += chunkWidth, index += 1) {
     const span: Band = { lower: at, upper: Math.min(range.upper, at + chunkWidth - 1) };
     const dist = distributeFromWeights(
-      weightsFor(span.lower, span.upper, activeId, shape, spotBlendBps)
+      weightsFor(span.lower, span.upper, activeId, shape, spotBlendBps, activeXShare)
     );
     const byBin = new Map(dist.map((d) => [d.binId, d]));
 

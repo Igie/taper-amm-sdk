@@ -513,19 +513,25 @@ impl<'a> PositionMut<'a> {
         Ok(())
     }
 
-    /// Checks a width a position may be *opened* at.
+    /// Checks a width a position may be *opened* at, against the storage the
+    /// account was created with.
     ///
-    /// Tighter than [`validate_width`] by exactly the inline block: an account
-    /// is created at [`Position::LEN`] and nothing may declare a band it has
-    /// no storage for, so a wider one is reached through `resize_position`.
-    /// That is what keeps `width <= capacity` true from the account's first
-    /// byte, and it is why no client ever has to recover from a position that
-    /// promised more range than it can hold.
-    pub fn validate_initial_width(width: usize) -> Result<()> {
-        require!(
-            width >= 1 && width <= INLINE_BINS_PER_POSITION,
-            CoreError::PositionTooWide
-        );
+    /// [`validate_width`] plus the one thing an opening has that a resize does
+    /// not: the account's length is fixed by the client that allocated it, so
+    /// the band it declares has to fit what arrived. That is what keeps
+    /// `width <= capacity` true from the account's first byte, and it is why
+    /// no client ever has to recover from a position that promised more range
+    /// than it can hold.
+    ///
+    /// The account is allocated by a top-level `create_account`, not by the
+    /// program, so `capacity` is whatever the client paid rent for — up to the
+    /// full [`MAX_BIN_PER_POSITION`]. A band that needs more storage than one
+    /// `resize_position` call could add is therefore reachable at the account's
+    /// first byte, which is the whole reason opening is not capped at the
+    /// inline block any more.
+    pub fn validate_initial_width(width: usize, capacity: usize) -> Result<()> {
+        Self::validate_width(width)?;
+        require!(width <= capacity, CoreError::PositionTooWide);
         Ok(())
     }
 }

@@ -13,7 +13,7 @@
  * anything.
  */
 import { describe, expect, test } from "bun:test";
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   INLINE_BINS_PER_POSITION,
   MAX_BINS_PER_EXTEND,
@@ -21,6 +21,7 @@ import {
   positionLenFor
 } from "../src/constants";
 import { resizeSteps } from "../src/instructions";
+import { rentFor } from "../src/native";
 import { arrayIndexesFor, binArrayIndex } from "../src/pda";
 import {
   MAX_TX_BYTES,
@@ -149,13 +150,15 @@ describe("the packet limit", () => {
     expect(widthThatFits(accounts, TX_HEADROOM_NATIVE, false)).toBe(INLINE_BINS_PER_POSITION);
   });
 
-  test("the chunk that opens a position pays for its second signature", () => {
-    // A position is a keypair account, so the opening transaction carries the
-    // position's signature as well as the owner's: 64 bytes, which is 16 bins
-    // of dense table. Only that one chunk pays it — sizing every fill as if it
-    // did would give away throughput for a cost they do not carry.
+  test("the chunk that opens a position pays for its signature and its account", () => {
+    // A position is a keypair account the client allocates, so the opening
+    // transaction carries two things no fill does: the position's signature,
+    // 64 bytes, and the `create_account` that gives it its length, 57 more —
+    // together 30 bins of dense table. Only that one chunk pays them, and
+    // sizing every fill as if it did would give away throughput for a cost
+    // they do not carry.
     expect(widthThatFits(accounts, TX_HEADROOM, true)).toBe(INLINE_BINS_PER_POSITION);
-    expect(widthThatFits(accounts, TX_HEADROOM_NATIVE, true)).toBe(66);
+    expect(widthThatFits(accounts, TX_HEADROOM_NATIVE, true)).toBe(52);
     expect(widthThatFits(accounts, TX_HEADROOM_NATIVE, true)).toBeLessThan(
       widthThatFits(accounts, TX_HEADROOM_NATIVE, false)
     );
@@ -182,7 +185,11 @@ describe("the packet limit", () => {
     const plan = deposit({ lower: 0, upper: 299, headroom: TX_HEADROOM_NATIVE });
     expect(plan.positions).toHaveLength(1);
     const deposits = plan.steps.filter((s) => s.kind !== "resizePosition");
-    expect(deposits.length).toBe(Math.ceil(300 / widthThatFits(accounts, TX_HEADROOM_NATIVE)));
+    // The opener carries fewer bins than a fill, so the count is one chunk at
+    // the opening width and the rest at the fill width.
+    const open = widthThatFits(accounts, TX_HEADROOM_NATIVE, true);
+    const fill = widthThatFits(accounts, TX_HEADROOM_NATIVE, false);
+    expect(deposits.length).toBe(1 + Math.ceil((300 - open) / fill));
   });
 
   test("a dense table is four bytes a bin, not eight", () => {
@@ -224,21 +231,47 @@ describe("planDeposit", () => {
     }
   });
 
-  test("growth is planned between opening the position and filling it", () => {
+  test("a new position needs no growth: it is opened at its whole band", () => {
     const plan = deposit();
     const kinds = plan.steps.map((s) => s.kind);
     expect(kinds[0]).toBe("openPosition");
 
-    // 205 bins: 70 inline, then one call covers the remaining 135.
-    expect(plan.steps.filter((s) => s.kind === "resizePosition")).toHaveLength(1);
-    // Every extension precedes every later deposit, or a fill would land in a
-    // bin the account has no room for.
-    expect(kinds.lastIndexOf("resizePosition")).toBe(1);
-    expect(kinds.slice(2).every((k) => k === "addLiquidity")).toBe(true);
+    // 205 bins, and not one `resize_position` among them. The client allocates
+    // the account — a top-level `create_account` is not capped the way a CPI
+    // is — so the band is whole from the first byte and every later step is a
+    // plain fill.
+    expect(plan.steps.filter((s) => s.kind === "resizePosition")).toHaveLength(0);
+    expect(kinds.slice(1).every((k) => k === "addLiquidity")).toBe(true);
+
+    // The account is created at the length the whole band needs, and the
+    // opening step is what pays for it.
+    expect(plan.positions[0].capacity).toBe(205);
+    expect(plan.positions[0].bytes).toBe(positionLenFor(205));
   });
 
-  test("resizes are absolute bands, and marked safe to retry", () => {
-    const plan = planDeposit({
+  test("the opening step allocates the account and declares the band", () => {
+    const plan = deposit({ lower: 0, upper: 199 });
+    const open = plan.steps[0];
+    expect(open.kind).toBe("openPosition");
+    const ixs = open.build(new Set(open.binArrays));
+    // `create_account`, `initialize_position`, `add_liquidity` — the whole
+    // opening, in one transaction, for a band nearly three times the inline
+    // block.
+    expect(ixs).toHaveLength(3);
+    expect(ixs[0].programId.equals(SystemProgram.programId)).toBe(true);
+    // 4-byte tag, lamports, space, owner.
+    expect(ixs[0].data.readUInt32LE(0)).toBe(0);
+    expect(Number(ixs[0].data.readBigUInt64LE(12))).toBe(positionLenFor(200));
+    expect(ixs[0].data.readBigUInt64LE(4)).toBe(rentFor(positionLenFor(200)));
+  });
+
+  test("a deposit plans no growth at all", () => {
+    // The two ways a position can be reached are opened-at-its-whole-band and
+    // matched-by-containment, and neither leaves a band to widen. `resize` is
+    // still computed against the *union* rather than the stretch, which is the
+    // guard that keeps a looser match from aiming a resize at part of a band
+    // and having it refused as `ResizeDropsLiquidity` — but it yields nothing.
+    const fresh = planDeposit({
       accounts,
       lower: 0,
       upper: 599,
@@ -247,21 +280,18 @@ describe("planDeposit", () => {
       amountY: 1_000_000_000n,
       shape: "spot"
     });
-    const extensions = plan.steps.filter((s) => s.kind === "resizePosition");
-    // 600 bins from an inline 70, 160 a call: four calls.
-    expect(extensions).toHaveLength(4);
-    for (const step of extensions) {
-      expect(step.idempotent).toBe(true);
-      expect(step.build(new Set())).toHaveLength(1);
-      expect(step.amountX).toBe(0n);
-    }
-    // Ids carry the target band, so a re-plan matches progress step for step.
-    expect(extensions.map((s) => s.id.split(":").slice(-2).join("…"))).toEqual([
-      "0…229",
-      "0…389",
-      "0…549",
-      "0…599"
-    ]);
+    expect(fresh.steps.filter((s) => s.kind === "resizePosition")).toHaveLength(0);
+    expect(fresh.positions[0].capacity).toBe(600);
+
+    const inside = deposit({
+      lower: -10,
+      upper: 10,
+      existingPositions: [
+        { address: Keypair.generate().publicKey, lowerBinId: -100, upperBinId: 104 }
+      ]
+    });
+    expect(inside.newPositions).toBe(0);
+    expect(inside.steps.filter((s) => s.kind === "resizePosition")).toHaveLength(0);
   });
 
   test("a position that is already wide enough needs no growth", () => {
@@ -271,6 +301,92 @@ describe("planDeposit", () => {
       ]
     });
     expect(plan.steps.some((s) => s.kind === "resizePosition")).toBe(false);
+  });
+
+  /*
+   * One-sided deposits into a band that spans the active bin.
+   *
+   * Funding the side the price has to cross to reach you, and leaving the
+   * other side's bins open and empty, is an ordinary way to enter a position —
+   * so the planner has to pay for the bins it actually fills and no more. The
+   * trap is that the *bps* on the unfunded side are still non-zero, so a chunk
+   * filter that reads the table rather than the amounts buys a signature for a
+   * transaction that deposits nothing.
+   */
+  test("a one-sided deposit buys no signature for the side it left empty", () => {
+    // Wide enough that whole chunks fall below the active bin: -200…20 is 221
+    // bins, all but 21 of them Y-only.
+    const band = { lower: -200, upper: 20, activeId: 0 };
+    const both = deposit(band);
+    const xOnly = deposit({ ...band, amountY: 0n });
+
+    expect(xOnly.allocatedX).toBe(1_000_000_000n);
+    expect(xOnly.allocatedY).toBe(0n);
+
+    const fills = (plan: ReturnType<typeof deposit>) =>
+      plan.steps.filter((s) => s.kind === "addLiquidity");
+    // Every *fill* it keeps places something.
+    for (const step of fills(xOnly)) {
+      expect(step.amountX + step.amountY).toBeGreaterThan(0n);
+    }
+    // Chunks that would have deposited only Y are gone.
+    expect(fills(xOnly).length).toBeLessThan(fills(both).length);
+
+    // Still one position, still opened over the whole band: the empty bins are
+    // reserved, not dropped.
+    expect(xOnly.positions).toHaveLength(1);
+    expect(xOnly.positions[0].spec.lowerBinId).toBe(band.lower);
+    expect(xOnly.positions[0].spec.upperBinId).toBe(band.upper);
+
+    // The opener is the one step allowed to place nothing — it exists to
+    // create the account, and here its own chunk is entirely on the unfunded
+    // side. It carries the account and the band alone: no deposit, and no bin
+    // arrays, because renting one for bins nothing lands in is money for
+    // nothing.
+    const open = xOnly.steps[0];
+    expect(open.kind).toBe("openPosition");
+    expect(open.amountX + open.amountY).toBe(0n);
+    expect(open.binArrays).toEqual([]);
+    // `create_account` and `initialize_position`, and nothing else.
+    expect(open.build(new Set())).toHaveLength(2);
+
+    // And the rent quoted follows: fewer arrays than the range spans.
+    expect(xOnly.missingArrays.length).toBeLessThan(both.missingArrays.length);
+    expect(xOnly.missingArrays.every((i) => both.missingArrays.includes(i))).toBe(true);
+
+    // Every array it does rent holds a bin it funds. The chunk straddling the
+    // active bin is trimmed to start there, so the array below it — which the
+    // program would have skipped past without ever loading — is never created.
+    const funded = new Set(
+      xOnly.positions[0].dist
+        .filter((_, i) => preview(xOnly.positions[0].dist, 1_000_000_000n, 0n)[i].amountX > 0n)
+        .map((d) => binArrayIndex(d.binId))
+    );
+    for (const index of xOnly.missingArrays) expect(funded.has(index)).toBe(true);
+
+    // The trim only touches the ends: what each remaining bin gets is exactly
+    // what the undivided table would have given it.
+    const whole = preview(xOnly.positions[0].dist, 1_000_000_000n, 0n);
+    for (const step of fills(xOnly)) {
+      expect(step.amountX).toBeGreaterThan(0n);
+    }
+    expect(fills(xOnly).reduce((a, s) => a + s.amountX, 0n)).toBe(
+      whole.reduce((a, r) => a + r.amountX, 0n)
+    );
+  });
+
+  test("a band on one side of the price ignores the token it cannot hold", () => {
+    // Wholly above the active bin, so every bin may hold X and none may hold
+    // Y. The Y offered has nowhere to go, and the plan places none of it —
+    // which is what `DepositForm` refuses outright rather than sending.
+    const plan = deposit({ lower: 10, upper: 60, activeId: 0 });
+    expect(plan.allocatedY).toBe(0n);
+    expect(plan.allocatedX).toBe(1_000_000_000n);
+
+    // And with *only* the token it cannot hold, there is nothing to sign.
+    const wrong = deposit({ lower: 10, upper: 60, activeId: 0, amountX: 0n });
+    expect(wrong.steps).toHaveLength(0);
+    expect(wrong.positions).toHaveLength(0);
   });
 
   test("rent is priced from the bytes, not the account count", () => {
@@ -339,8 +455,12 @@ describe("planDeposit", () => {
       }
     }
     // A curve peaks at the active bin and falls away monotonically on each
-    // side, chunk boundaries included.
-    for (let id = -99; id <= 0; id += 1) {
+    // side, chunk boundaries included. The active bin itself sits out the walk:
+    // it is the only bin holding both tokens, and its two halves are normalised
+    // against two different sides — 105 bins of X here against 101 of Y — so
+    // the raw sum of its amounts is not comparable with a one-sided
+    // neighbour's. `shapes.test.ts` is where that bin's share is pinned.
+    for (let id = -99; id <= -1; id += 1) {
       expect(placed.get(id) ?? 0n).toBeGreaterThanOrEqual(placed.get(id - 1) ?? 0n);
     }
     for (let id = 1; id <= 103; id += 1) {
@@ -404,6 +524,79 @@ describe("planDeposit", () => {
     // Someone else creating one between plan and send costs nothing.
     const partial = plan.steps[0].build(new Set([arrays[0]]));
     expect(partial).toHaveLength(warm.length + arrays.length - 1);
+  });
+
+  /*
+   * Depositing into a *stretch* of a band the owner already holds.
+   *
+   * The commonest thing anyone does to a position: the price has moved, and
+   * they top up the bins it moved towards. It is an ordinary `add_liquidity`
+   * over those bins — the band does not move and no second account is needed —
+   * but the planner used to match a position only by an *exact* band, so a
+   * narrower range fell through to opening one. Two positions over the same
+   * bins pay two rents and split the band's fees across two accounts.
+   */
+  describe("a range inside a band the owner already holds", () => {
+    const held = {
+      address: Keypair.generate().publicKey,
+      lowerBinId: -100,
+      upperBinId: 104,
+      capacity: 205
+    };
+
+    test("fills that position rather than opening a second over the same bins", () => {
+      const plan = deposit({ lower: -20, upper: 20, existingPositions: [held] });
+      expect(plan.newPositions).toBe(0);
+      expect(plan.newPositionBytes).toBe(0);
+      expect(plan.positions).toHaveLength(1);
+      expect(plan.positions[0].address).toEqual(held.address);
+      expect(plan.steps.every((s) => s.kind === "addLiquidity")).toBe(true);
+    });
+
+    test("leaves the band exactly where it was", () => {
+      const plan = deposit({ lower: -20, upper: 20, existingPositions: [held] });
+      // `resize_position` takes an absolute band, so aiming it at the stretch
+      // would shrink the position to it — and a resize dropping a bin that
+      // still holds shares is refused outright. The union is the band it has.
+      expect(plan.steps.some((s) => s.kind === "resizePosition")).toBe(false);
+      expect(plan.positions[0].band).toEqual({ lower: -100, upper: 104 });
+    });
+
+    test("deposits all of the amounts into the stretch, not a share of them", () => {
+      const plan = deposit({ lower: -20, upper: 20, existingPositions: [held] });
+      // The shape is normalised against the range, so narrowing it is a
+      // different deposit and not a filtered one.
+      expect(plan.allocatedX).toBe(1_000_000_000n);
+      expect(plan.allocatedY).toBe(1_000_000_000n);
+      const bins = plan.steps.flatMap((s) => s.binArrays);
+      expect(bins).toEqual(expect.arrayContaining(arrayIndexesFor(-20, 20)));
+      // And nothing outside it: an array is 6,792 bytes of rent.
+      expect(plan.missingArrays).toEqual(arrayIndexesFor(-20, 20));
+    });
+
+    test("two stretches of one position keep distinct step ids", () => {
+      // The runner keys "already done" off the id, so a collision would skip a
+      // deposit rather than send it. Forced by capping the position width, the
+      // only way one range becomes two specs inside one band.
+      const plan = deposit({
+        lower: -100,
+        upper: 104,
+        existingPositions: [held],
+        maxPositionWidth: 60
+      });
+      const ids = plan.steps.map((s) => s.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(plan.positions.every((p) => p.address.equals(held.address))).toBe(true);
+      expect(plan.newPositions).toBe(0);
+    });
+
+    test("a range only overlapping the band opens a position, as it always did", () => {
+      // Containment, not intersection: a range reaching outside the band is
+      // not a stretch of it, and the planner has no business resizing a
+      // position to swallow one.
+      const plan = deposit({ lower: -200, upper: 20, existingPositions: [held] });
+      expect(plan.newPositions).toBeGreaterThan(0);
+    });
   });
 
   test("missingArrays reports only what is not there yet", () => {
@@ -477,6 +670,37 @@ describe("planExit", () => {
     // Closing is refused: the rest of each position still holds shares.
     expect(plan.closing).toBe(0);
     expect(plan.steps).toHaveLength(2);
+    // Ten bins out of the first position, eleven out of the second — the range
+    // is intersected with each band rather than validated against it.
+    expect(plan.bins).toBe(21);
+    // And it rents nothing outside the range: a full exit of these two spans
+    // four arrays, this one spans the two the range falls in.
+    const spanned = new Set(arrayIndexesFor(-10, 10));
+    for (const step of plan.steps) {
+      for (const index of step.binArrays) expect(spanned.has(index)).toBe(true);
+    }
+  });
+
+  test("a range covering one position leaves the other out entirely", () => {
+    const plan = planExit({ accounts, positions: held, bps: 10_000, range: { lower: 0, upper: 69 } });
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.bins).toBe(70);
+  });
+
+  test("a range holding no shares is not a claim in disguise", () => {
+    // The position is owed a fee, but the stretch the caller drew holds
+    // nothing. A whole-position exit would claim; a ranged one does nothing,
+    // because there is no withdrawal for the claim to ride along with.
+    const owed = { address: key(), view: position(0, 69, 11n) };
+    owed.view.shares = owed.view.shares.map((s, i) => (i < 10 ? s : 0n));
+
+    const ranged = planExit({ accounts, positions: [owed], bps: 10_000, range: { lower: 40, upper: 50 } });
+    expect(ranged.steps).toHaveLength(0);
+    expect(ranged.bins).toBe(0);
+
+    const whole = planExit({ accounts, positions: [owed], bps: 10_000 });
+    expect(whole.steps).toHaveLength(1);
+    expect(whole.bins).toBe(10);
   });
 
   test("a position with nothing to do is left out", () => {
@@ -655,6 +879,31 @@ describe("planRebalance", () => {
     // Nothing leaves a band that only widens.
     expect(plan.leaving).toEqual([]);
     expect(plan.steps.some((s) => s.kind === "exitPosition")).toBe(false);
+  });
+
+  test("resizes are absolute bands, and marked safe to retry", () => {
+    // A widening move is where growth lives now that a new position is opened
+    // at its whole band. 600 bins from an account holding 70, 160 a call: four
+    // calls, each naming the band it wants rather than the bins it adds.
+    const plan = planRebalance({
+      accounts,
+      position: at(0, 69),
+      target: { lower: 0, upper: 599 }
+    });
+    const extensions = plan.steps.filter((s) => s.kind === "resizePosition");
+    expect(extensions).toHaveLength(4);
+    for (const step of extensions) {
+      expect(step.idempotent).toBe(true);
+      expect(step.build(new Set())).toHaveLength(1);
+      expect(step.amountX).toBe(0n);
+    }
+    // Ids carry the target band, so a re-plan matches progress step for step.
+    expect(extensions.map((s) => s.id.split(":").slice(-2).join("…"))).toEqual([
+      "0…229",
+      "0…389",
+      "0…549",
+      "0…599"
+    ]);
   });
 
   test("moving nowhere is no steps at all", () => {

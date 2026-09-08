@@ -14,3 +14,7 @@ dist/
 /taper.json
 .anchor/
 test-ledger/
+
+# Program binaries pulled down for comparison against a build. Never
+# committed: they are output, and a stale one is worse than none.
+*.so

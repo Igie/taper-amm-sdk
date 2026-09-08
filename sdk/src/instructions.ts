@@ -1,6 +1,7 @@
 /** One builder per program instruction, plus the account lists they share. */
 import { PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js";
-import { DISCRIMINATORS as DISC, MAX_BINS_PER_EXTEND } from "./constants";
+import { DISCRIMINATORS as DISC, MAX_BINS_PER_EXTEND, PROGRAM_ID, positionLenFor } from "./constants";
+import { rentFor } from "./native";
 import { ix, Writer } from "./codec";
 import { binArrayPda, configPda, poolPda, reservePda } from "./pda";
 import type {
@@ -121,13 +122,62 @@ export function initializeBinArrayIx(funder: PublicKey, pool: PublicKey, config:
 }
 
 /**
+ * Allocates the account a position will live in, at the length its band needs.
+ *
+ * The program does not create this account, and the reason is the runtime: an
+ * account created through a **CPI** may not exceed 10,240 bytes, which is 157
+ * bins, while a position runs to `MAX_BINS_PER_POSITION`. A top-level
+ * `create_account` has no such cap, so the client allocates and
+ * `initialize_position` only checks that the band fits what arrived.
+ *
+ * Rent is computed rather than fetched — `rentFor` is the runtime's own
+ * formula — because the SDK has no RPC layer. A short account is not a silent
+ * problem: the runtime refuses any transaction that leaves a data-carrying
+ * account below the rent-exempt minimum.
+ */
+export function createPositionAccountIx(payer: PublicKey, position: PublicKey, width: number) {
+  const space = positionLenFor(width);
+  return SystemProgram.createAccount({
+    fromPubkey: payer,
+    newAccountPubkey: position,
+    lamports: Number(rentFor(space)),
+    space,
+    programId: PROGRAM_ID
+  });
+}
+
+/**
+ * The two instructions that open a position: allocate the account, then
+ * declare the band over it.
+ *
+ * They belong together — an allocated account that was never initialised is a
+ * position nobody can use and rent nobody gets back — so this is what callers
+ * should reach for. `initializePositionIx` alone is for a caller that has
+ * already created the account some other way.
+ */
+export function openPositionIxs(
+  owner: PublicKey,
+  pool: PublicKey,
+  config: PublicKey,
+  position: PublicKey,
+  lowerBinId: number,
+  width: number
+): TransactionInstruction[] {
+  return [
+    createPositionAccountIx(owner, position, width),
+    initializePositionIx(owner, pool, config, position, lowerBinId, width)
+  ];
+}
+
+/**
  * Opens a position at `position`, which is a **keypair the caller generates**
  * and must sign this transaction with — a position is not a PDA, so there is
  * nothing to derive and nothing to collide with.
  *
- * `width` may not exceed `INLINE_BINS_PER_POSITION`: the account is created at
- * exactly that size, and a band is never allowed to declare range its account
- * cannot hold. Anything wider is reached with `resizePositionIx`.
+ * The account must already exist, be owned by the program and be long enough
+ * for `width` bins: `createPositionAccountIx` is the instruction that puts it
+ * there, and `openPositionIxs` is the pair. A band wider than the account can
+ * hold is refused as `PositionTooWide`.
  */
 export function initializePositionIx(
   owner: PublicKey,
