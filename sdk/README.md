@@ -15,6 +15,23 @@ bun install
 bun test
 ```
 
+## Installing it
+
+```
+bun add @taper/sdk        # or npm / pnpm / yarn
+```
+
+`@solana/web3.js` and `@solana/spl-token` are peer dependencies — the versions
+your app already has are the ones the SDK should build against, since
+`PublicKey` and `TransactionInstruction` cross the boundary.
+
+**The package entry is TypeScript source, so it needs a consumer that compiles
+it** — Vite, bun, webpack, esbuild, or any other bundler. That is deliberate:
+it is what the workspace this is split from already resolved, so the published
+package and the repository's own build are the same code rather than two
+artifacts that can drift. The compiled form travels too, at `@taper/sdk/dist`,
+for a consumer that cannot transpile a dependency.
+
 ## What it is not
 
 There is no `Connection`, no RPC client, and no transaction sender. The SDK

@@ -10,6 +10,19 @@
     "liquidity",
     "taper"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Igie/taper-amm-sdk.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/Igie/taper-amm-sdk/tree/main/sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Igie/taper-amm-sdk/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -17,6 +30,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./dist": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "files": [
