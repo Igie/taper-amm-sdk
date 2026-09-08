@@ -1,5 +1,5 @@
 /**
- * `@taper/sdk` — a client-side view of the `taper-amm` ABI.
+ * `taper-amm-sdk` — a client-side view of the `taper-amm` ABI.
  *
  * Written as an external client on purpose, exactly like `tests/src/lib.rs`:
  * discriminators are the constants Anchor generates, instructions are packed

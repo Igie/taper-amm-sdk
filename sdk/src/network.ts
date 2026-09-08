@@ -3,7 +3,7 @@
  *
  * This is the one piece of client configuration the SDK owns rather than
  * leaves to the caller, and it is here for a reason the rest of the package
- * makes obvious: everything else in `@taper/sdk` is network-independent by
+ * makes obvious: everything else in `taper-amm-sdk` is network-independent by
  * construction. PDAs, instruction encodings, account offsets and the ladder
  * are the same bytes on every cluster, so a network is not a variant of the
  * ABI — it is a default endpoint, an explorer prefix, and a warning about

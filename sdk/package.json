@@ -1,5 +1,5 @@
 {
-  "name": "@taper/sdk",
+  "name": "taper-amm-sdk",
   "version": "0.1.0",
   "description": "Client-side view of the taper-amm ABI: PDAs, instruction builders, account parsers, a swap quote, and an independent f64 ladder. Transport free — no RPC layer.",
   "license": "Apache-2.0",
@@ -18,9 +18,6 @@
   "homepage": "https://github.com/Igie/taper-amm-sdk/tree/main/sdk#readme",
   "bugs": {
     "url": "https://github.com/Igie/taper-amm-sdk/issues"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "sideEffects": false,
   "type": "module",

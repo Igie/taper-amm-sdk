@@ -1,4 +1,4 @@
-# `@taper/sdk`
+# `taper-amm-sdk`
 
 A client-side view of the [`taper-amm`](https://explorer.solana.com/address/taperAJP7yuCyqnFUW3Xa3byvQ2YRY29w73NJrjYRUd)
 ABI: program addresses, PDAs, instruction builders, account parsers, a swap
@@ -18,7 +18,7 @@ bun test
 ## Installing it
 
 ```
-bun add @taper/sdk        # or npm / pnpm / yarn
+bun add taper-amm-sdk        # or npm / pnpm / yarn
 ```
 
 `@solana/web3.js` and `@solana/spl-token` are peer dependencies — the versions
@@ -29,7 +29,7 @@ your app already has are the ones the SDK should build against, since
 it** — Vite, bun, webpack, esbuild, or any other bundler. That is deliberate:
 it is what the workspace this is split from already resolved, so the published
 package and the repository's own build are the same code rather than two
-artifacts that can drift. The compiled form travels too, at `@taper/sdk/dist`,
+artifacts that can drift. The compiled form travels too, at `taper-amm-sdk/dist`,
 for a consumer that cannot transpile a dependency.
 
 ## What it is not
@@ -95,7 +95,7 @@ src/
 import {
   PROGRAM_ID, buildConfig, initializeConfigIx, poolPda, orderMints,
   parsePool, tokenPairOf, poolFilters, Ladder
-} from "@taper/sdk";
+} from "taper-amm-sdk";
 
 // Mint order is not optional: the pool PDA is seeded with both mints, so the
 // same pair would otherwise be creatable at two addresses.
@@ -120,7 +120,7 @@ differ: a default endpoint, an explorer link, and whether a mistake costs real
 money (`live`).
 
 ```ts
-import { NETWORKS, networkFor, withEndpoint, explorerTx } from "@taper/sdk";
+import { NETWORKS, networkFor, withEndpoint, explorerTx } from "taper-amm-sdk";
 
 const network = withEndpoint(networkFor("mainnet-beta")!, myPrivateRpc);
 const connection = new Connection(network.endpoint, "confirmed");

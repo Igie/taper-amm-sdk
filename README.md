@@ -13,7 +13,7 @@ it, and nothing else. Three crates and one npm package:
 | [`crates/taper-core`](crates/taper-core) | the ladder, the swap walk, the fee schedule and the account layouts — the same code the on-chain program runs |
 | [`jupiter/taper-amm-sdk`](jupiter/taper-amm-sdk) | Taper from the outside, in Rust: PDAs, account parsing, quotes, instruction builders |
 | [`jupiter/taper-jupiter`](jupiter/taper-jupiter) | `jupiter_amm_interface::Amm`, and nothing else |
-| [`sdk`](sdk) | `@taper/sdk` — the same surface in TypeScript, for wallets, front ends and scripts |
+| [`sdk`](sdk) | `taper-amm-sdk` — the same surface in TypeScript, for wallets, front ends and scripts |
 
 ```powershell
 cd jupiter
@@ -74,7 +74,7 @@ and a WebSocket-less local simulator without a branch.
 ```ts
 import {
   NETWORKS, PROGRAM_ID, poolPda, parsePool, quoteSwap, swapIx, minOutFor
-} from "@taper/sdk";
+} from "taper-amm-sdk";
 ```
 
 `network.ts` names mainnet, devnet and localnet with their default endpoints
